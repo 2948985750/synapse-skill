@@ -101,6 +101,9 @@ function appendMaintenanceLog(line, dir = dataDir()) {
 
 async function acquireMaintenanceLock(timeoutMs = 30000, dir = dataDir()) {
   const file = maintenanceLockFile(dir);
+  // 全新安装时 data/ 不存在（gitignore 掉了空目录），早先 openSync 直接 ENOENT，
+  // 导致 doctor 在任何一次干净安装上都跑不起来。
+  fs.mkdirSync(dir, { recursive: true });
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {

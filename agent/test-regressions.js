@@ -82,4 +82,13 @@ test("invalid --filter yields INVALID_FILTER instead of a bare SyntaxError", asy
   );
 });
 
-console.log("ALL-REGRESSIONS-OK (2 cases)");
+// bug⑤：CLI 路径上的非法 --filter 早先抛裸 SyntaxError，被归一成 COMMAND_FAILED。
+test("validateOptions rejects an invalid --filter with INVALID_FILTER", () => {
+  const { validateOptions } = require("./cli");
+  assert.throws(
+    () => validateOptions({ waitMs: 1000, durationMs: 1000, bodyMaxKb: 1, snapMax: 1, filter: "[" }),
+    (error) => error.code === "INVALID_FILTER",
+  );
+});
+
+console.log("ALL-REGRESSIONS-OK (3 cases)");

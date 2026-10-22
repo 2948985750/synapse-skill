@@ -266,7 +266,17 @@ function validateOptions(opts) {
   for (const name of ["waitMs", "durationMs", "bodyMaxKb", "snapMax"])
     if (!Number.isFinite(opts[name]) || opts[name] <= 0)
       throw new Error(name + " must be a positive number");
-  if (opts.filter) new RegExp(opts.filter, "i");
+  if (opts.filter) {
+    // 早先这里直接 new RegExp，抛的是裸 SyntaxError，CLI 路径上永远走不到
+    // capture.js 的 INVALID_FILTER，用户只看到 COMMAND_FAILED。
+    try {
+      new RegExp(opts.filter, "i");
+    } catch (error) {
+      const wrapped = new Error("--filter 不是合法正则：" + error.message);
+      wrapped.code = "INVALID_FILTER";
+      throw wrapped;
+    }
+  }
   if (
     opts.clientId &&
     (typeof opts.clientId !== "string" || opts.clientId.length > 128)
