@@ -1,146 +1,72 @@
-# Synapse
+# synapse-skill
 
-让**本机的 AI 编程代理**驱动你**已登录**的 Chrome/Edge：读渲染 DOM、驱动输入、
-捕获页面自身 API 响应、跑任意页内 JS。
+**agent 侧桥**：在本机回环起一个 WebSocket server，等浏览器里的 Synapse 扩展主动拨入，
+把 CDP 命令透传进你**已经开着、已经登录**的 Chrome/Edge 标签。
 
-核心是一个 MV3 扩展（`chrome.debugger` 全量 CDP 透传）+ 一个 agent 侧回环 WebSocket 桥。
-无 `--remote-debugging-port`、无 native messaging、无服务端、无遥测。
+不启动新浏览器、不碰 profile、不复用 cookie 文件——登录态就在那个标签里。
 
 ```
-你的程序 / agent（agent/agent-collect.js）
-      │  本机回环起 WS server（127.0.0.1:9521-9540）
-      ▼  ◄── 扩展 service worker 主动拨入（保持 SW 存活）
-扩展（extension/src/background.js，chrome.debugger.attach → CDP 全透传）
-      ▼
-你活着的浏览器（登录态在里面）
+你的程序 / agent  ──WS──▶  synapse agent（本仓库，127.0.0.1:9521-9540）
+                                    ▲
+                                    │ 扩展 service worker 主动拨入
+                          Synapse 扩展（另一仓库）
+                                    ▼
+                          你活着的浏览器标签（登录态在里面）
 ```
 
-- 多会话并发：每会话一个桥（`data/bridges/<session>.json` 注册表），
-  one-shot 按 会话桥 → 其它活桥 → 直连 级联故障转移。
-- 链路恢复：`agent-collect.js doctor`（礼貌等待 → 维护锁协调硬刷）。
+## 本仓库只含 node 侧
 
-## 分层：哪些归扩展，哪些归 agent
-
-判定标准只有一条：**浏览器要加载的 → 扩展层；`require` 进来的 → agent 层。**
-
-| 层 | 跑在哪 | 内容 | 目录 |
-|---|---|---|---|
-| **扩展层** | 浏览器 MV3 service worker | `manifest.json`、service worker、`chrome.debugger` attach 与透传、页内 JS 注入、`Input.dispatch*` 物理输入、**浏览器侧** `ws-auth.js` | `extension/src/` |
-| **Agent 层** | node 进程 | CLI 解析、桥发现/注册表/故障转移、`bridge-router`（tab FIFO + clientId 租约）、`bridge-auth`（node 侧）、`paths`、`doctor`、测试 | `agent/` |
-
-两侧各有一份 `ws-auth.js`（HMAC 挑战/证明），这是**唯一合理的重复**：浏览器不能
-`require` node 模块，两边用同一套协议做对等鉴权，由 `extension/src/test-ws-auth.js`
-的互通测试锁住一致性。
-
-> 目录名不使用 `native-host`：那是 [native messaging](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging)
-> 通道的名字，本项目**没有**用它（早年的宿主实现已废弃）。桥走的是 127.0.0.1 WebSocket，
-> 所以 node 侧叫 `agent/`。
-
-## 目录
-
-| 路径 | 内容 |
+| 在不在本仓库 | 内容 |
 |---|---|
-| `extension/` | MV3 扩展本体（`manifest.json` + `src/` + `icons/`） |
-| `extension/store/` | 商店发布工具（`gen-icons.js`、`build-store.js`、`LISTING.md`） |
-| `agent/` | agent 侧 CLI/桥（`agent-collect.js` + 路由 + 鉴权 + vendored ws） |
-| `agent/paths.js` | 路径集中解析（`WB_*` 环境变量） |
-| `package.json` | `npm test` / `npm run verify` |
+| ✅ 在 | CLI、桥发现/注册表、路由（tab FIFO + clientId 租约）、鉴权（node 侧）、`doctor`、测试 |
+| ❌ 不在 | MV3 扩展（manifest、service worker、`chrome.debugger`、页内注入、侧边栏）→ 见 [synapse](https://github.com/2948985750/synapse) |
 
-`agent/` 内部按职责拆分（2026-10 重构，原单文件 1677 行 → 300 行级模块）：
+两侧唯一的"重复"是 `ws-auth.js`：浏览器不能 `require` node 模块，所以协议
+`wb-cdp-ws/2`（HMAC 挑战/证明）两边各实现一份，由扩展仓库的 `test-ws-auth.js` 做互通验证。
 
-| 模块 | 内容 |
-|---|---|
-| `agent-collect.js` | 入口：serve/keep 常驻桥、main 调度、对外导出（测试依赖此文件） |
-| `cli.js` | 参数解析与命令构造（纯函数，不碰网络/文件） |
-| `commands.js` | 命令清单唯一来源，`usage()` 由它渲染 |
-| `transport.js` | WS 连接、桥级联故障转移、命令执行 |
-| `capture.js` | 网络响应体捕获的结果整形与多标签编排 |
-| `doctor.js` | 链路体检 + 协调恢复（唯一碰 Windows 细节的模块） |
-| `registry.js` | 桥发现记录（注册表 / 遗留单文件） |
-| `config.js` | 端口段、命令超时、探测时限、锁 TTL |
-| `lib/json-store.js` | JSON 读写 + **原子写**（tmp + rename） |
-| `lib/ui.js` | stdout JSON 出口与错误归一化 |
+## 安装
 
-cdp skill 通过 `cdp/scripts/lib/bridge.js` 引用本仓库的 `agent/`，不保存副本。
+零依赖：`agent/vendor/ws/` 已 vendored ws 8.x，不需要 `npm install`。
+只需要 Node ≥ 18。
 
-## 快速开始（本地 unpacked）
+```powershell
+node agent/agent-collect.js serve mysession     # 起常驻桥
+node agent/agent-collect.js status --session mysession
+node agent/agent-collect.js list   --session mysession
+```
 
-1. 浏览器 `edge://extensions`（或 `chrome://extensions`）→ 开发者模式 →
-   加载已解压 → 选 `extension/`。
-2. 起一个常驻桥，并记住会话名：
-
-   ```powershell
-   node agent/agent-collect.js serve mysession
-   ```
-
-3. 之后每条命令都带 `--session mysession`，毫秒级走自己的桥：
-
-   ```powershell
-   node agent/agent-collect.js status --session mysession
-   node agent/agent-collect.js list   --session mysession
-   node agent/agent-collect.js open "https://example.com" --session mysession
-   ```
-
-   > `--session <sid>` 与环境变量 `WB_SESSION` 等价。**Windows 下用 `--session`**，
-   > `WB_SESSION=x node ...` 是 POSIX 前置写法，PowerShell 不认（要用
-   > `$env:WB_SESSION="mysession";` 单独一行）。
-
-4. 链路异常：`node agent/agent-collect.js doctor`。
-
-命令面：`list / open / navigate / close / run / cdp / capture / capture-many /
-snapshot / click-el / type-el / attach / detach / diag / status / serve / pair /
-doctor`（`--keep / --wait / --force / --dry / --nowait / --sync / --all` 等选项见
-`node agent/agent-collect.js` 的 `usage()`）。
+完整命令表见 [SKILL.md](SKILL.md)，或直接跑 `node agent/agent-collect.js`（用法由
+`agent/commands.js` 生成）。
 
 ## 路径配置
 
-路径不硬编码，全部由 `agent/paths.js` 解析（向上找含 `SKILL.md` / 仓库根的目录）：
-
 | 变量 | 缺省 | 用途 |
 |---|---|---|
-| `WB_DATA_DIR` | `data/` | 数据根（注册表 / 遗留单文件 / 维护日志） |
+| `WB_DATA_DIR` | `<repo>/data` | 数据根（注册表 / 遗留单文件 / 维护日志） |
 | `WB_BRIDGE_DIR` | `<data>/bridges` | 多会话桥注册表目录 |
 | `WB_BRIDGE_FILE` | `<data>/bridge.json` | 遗留单文件桥记录 |
 | `WB_CDP_EXT_DIR` | 候选推导 → 报错 | `doctor` 硬刷时的 `--load-extension` 根（须含 `manifest.json`） |
-| `WB_EDGE_EXE` | 自动查找 `msedge.exe` | Edge 可执行文件 |
+| `WB_EDGE_EXE` | 自动查找 `msedge.exe` | Edge 可执行路径 |
 | `WB_AGENT_WS_START` / `WB_AGENT_WS_END` | `9521` / `9540` | 端口段（须与扩展一致） |
 
-`data/` 是运行时工作区，不进版本控制（见 `.gitignore`），首次运行自动创建。
+`data/` 是运行时工作区，不入库，首次运行自动创建。
 
 ## 测试
 
 ```powershell
-npm test              # tablock(8) + background(27) + agent bridge(28)，全部浏览器无关
-npm run test:ws-auth  # 浏览器侧与 node 侧 ws-auth 的互通/重放/伪造测试
-npm run verify        # syntax + npm test
+npm test           # bridge 28 + 命令表漂移守卫 + review 回归 2 例
+npm run test:agent # 仅桥
+npm run verify
 ```
 
-## 与 cdp skill 的关系
+## 已知限制
 
-**实现只有这一份。** cdp skill（`../cdp`）不保存副本，它通过
-`cdp/scripts/lib/bridge.js` 解析到本仓库的 `agent/agent-collect.js`：
+- **`doctor` 的硬刷会杀掉所有 `msedge.exe`**（`taskkill /im`），包括用户自己的窗口，
+  并清理默认 profile 的 `Service Worker` / `Code Cache`。开发机可用，作为对外工具偏激进，
+  正在评估收窄到"只杀本工具启动的实例"。
+- 鉴权当前只防网页（Origin 白名单）：`DEFAULT_TOKEN` 是源码常量，本机进程无需配对即可连接。
+  发布前需重新决策是否恢复真正的配对。
 
-```
-cdp/scripts/lib/bridge.js（全 cdp 唯一知道桥在哪的地方）
-      │  SYNAPSE_AGENT 环境变量
-      │  → 同级 ../synapse-skill/agent/
-      │  → ~/.dsh/skills/synapse{,-skill}/agent/
-      ▼
-本仓库 agent/（唯一实现）
-```
+## 相关仓库
 
-因此改 `agent/` 里的任何代码，cdp 立刻生效，**没有同步步骤、也没有漂移可能**。
-代价是 cdp 不能再脱离本仓库单独拷贝（要单独部署就设 `SYNAPSE_AGENT` 指向本仓库）。
-
-cdp 的 `extension/` 仍是它自己的扩展本体，与本仓库的 `extension/` 各自独立。
-
-## 发布到 Edge 商店
-
-`node extension/store/build-store.js` 生成干净 dist（manifest 在包根，无测试件、
-无 agent 侧代码）→ 打 zip 上传 [aka.ms/edgedevcenter](https://aka.ms/edgedevcenter)；
-列表文案与审核问答在 `extension/store/LISTING.md`。
-
-## 隐私
-
-无任何服务端 / 遥测；扩展只与用户本机启动的桥经 `127.0.0.1` 通信。
-（隐私政策页见仓库外的 `synapse-privacy` Pages 站点。）
+- [synapse](https://github.com/2948985750/synapse) — MV3 扩展与商店发布工具。
