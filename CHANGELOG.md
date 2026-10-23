@@ -9,6 +9,18 @@
 
 ## 2026-10-23 — 配对闭环 + 两个 P1
 
+### BUG-12 capture 没有资源上界（P1）
+
+- **15 分钟会话**：扩展侧 `durationMs` 是 `opts.durationMs + 900000`，每次 capture 都在扩展里
+  挂一个 15 分钟会话。现在改为 `+ 120000`（窗口 + 兜底取体所需）。
+- **无差别 eager 取体**：对**所有** `Network.loadingFinished` 都发 `getResponseBody`，
+  不看 type/URL/filter。实测 120 条无关事件 → 120 次取体、约 60MB。现在先按
+  `requestWillBeSent` 的 type/url 建候选，只取 xhr/fetch/命中 filter 的。
+- **无上限**：bodyStore 加 16MB 总预算，并发取体限 8 个。
+- **兜底路径无总时限**：最多 40 条 × 20s 串行，capture 可能跑十几分钟。现在加
+  `bodyDeadlineMs`（默认 120s），单条超时取剩余预算，超时条目标 `bodyError`。
+- **回归测试**：120 条无关 `loadingFinished` + 1 条 xhr → 断言只取 1 次体。
+
 ### BUG-11 `serve` / `--keep` 写注册表失败会把进程挂住（P1）
 
 - **现象**：注册表写不进去（如 `WB_BRIDGE_DIR` 指向文件下的路径），stdout 已经输出

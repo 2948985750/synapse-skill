@@ -115,4 +115,29 @@ test("readToken follows the pairing file and falls back to the default key", (t)
   assert.equal(reload().readToken(), DEFAULT_TOKEN, "删掉配对文件后回到默认密钥");
 });
 
-console.log("ALL-REGRESSIONS-OK (4 cases)");
+// bug⑦：capture 对所有 loadingFinished 无差别 eager 取体（无过滤、无上限）。
+test("capture only eagerly fetches bodies for candidate requests", async () => {
+  const { doCaptureMany } = require("./capture");
+  const events = new Map();
+  const list = [];
+  for (let i = 0; i < 120; i++) list.push({ method: "Network.loadingFinished", params: { requestId: "r" + i } });
+  list.push({ method: "Network.requestWillBeSent", params: { requestId: "rx", type: "XHR", request: { url: "https://e.test/api" } } });
+  list.push({ method: "Network.loadingFinished", params: { requestId: "rx" } });
+  events.set("cap1", list);
+
+  const fetched = [];
+  const sendCmd = async (obj) => {
+    if (obj.cmd === "capture.start") return { ok: true, result: { captureId: "cap1" } };
+    if (obj.cmd === "capture.stop") return { ok: true, result: {} };
+    if (obj.cmd === "cdp" && obj.args.method === "Network.getResponseBody") {
+      fetched.push(obj.args.params.requestId);
+      return { ok: true, result: { body: "{}" } };
+    }
+    return { ok: true, result: {} };
+  };
+  const results = await doCaptureMany(sendCmd, [{ tabId: 1, action: "wait" }], { durationMs: 400, bodyMaxKb: 1 }, events);
+  assert.equal(results.length, 1);
+  assert.deepEqual(fetched, ["rx"], "只应对候选请求取体，无关的 120 条不应触发 getResponseBody");
+});
+
+console.log("ALL-REGRESSIONS-OK (5 cases)");

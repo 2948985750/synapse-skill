@@ -82,6 +82,8 @@ async function buildCaptureSessionResult(sendCmd, s, events, opts, bodyStore) {
     return { body, bodyTruncated };
   };
   const out = [];
+  // 兜底取体的总预算：早先是最多 40 条 × 20s 串行、无总时限，capture 命令可能跑十几分钟。
+  const bodyDeadline = Date.now() + (opts.bodyDeadlineMs || 120000);
   for (const c of cands) {
     let body = "";
     let bodyTruncated = false;
@@ -90,6 +92,13 @@ async function buildCaptureSessionResult(sendCmd, s, events, opts, bodyStore) {
     if (pre) {
       ({ body, bodyTruncated } = decodeBody(pre.body, pre.base64Encoded));
     } else {
+      const remaining = bodyDeadline - Date.now();
+      if (remaining <= 0) {
+        bodyError = "body fetch deadline exceeded";
+        out.push({ url: c.url, method: c.method, type: c.type, status: c.status,
+          mimeType: c.mimeType, size: c.size, body, bodyTruncated, bodyError });
+        continue;
+      }
       try {
         const r = await sendCmd(
           {
@@ -100,7 +109,7 @@ async function buildCaptureSessionResult(sendCmd, s, events, opts, bodyStore) {
               params: { requestId: c.requestId },
             },
           },
-          20000,
+          Math.min(20000, Math.max(1000, remaining)),
         );
         if (r.ok && r.result && typeof r.result.body === "string") {
           ({ body, bodyTruncated } = decodeBody(
@@ -185,7 +194,9 @@ async function doCaptureMany(sendCmd, pairs, opts, eventsByCapture) {
           args: {
             tabId: pair.tabId,
             domains: ["Network"],
-            durationMs: opts.durationMs + 900000,
+            // 扩展侧 session 只要盖住窗口 + 兜底取体，不需要 15 分钟：
+            // 早先是 durationMs + 900000，等于每次 capture 都在扩展里挂 15 分钟会话。
+            durationMs: opts.durationMs + 120000,
           },
         }),
       );
@@ -197,8 +208,40 @@ async function doCaptureMany(sendCmd, pairs, opts, eventsByCapture) {
     // eager 取响应体（T-30）：loadingFinished 一到就取，不等窗口关完——
     // 顶层 octet-stream 文档体关窗后取会报 No resource。取不到的回落旧路径。
     const bodyStore = new Map(); // "captureId:requestId" -> {body, base64Encoded}
+    // 资源上界：单次 capture 最多缓存 16MB 响应体、同时最多 8 个取体请求。
+    // 早先对所有 loadingFinished 无差别 eager 取体且无上限，实测 120 条无关事件
+    // 会产生 120 次 getResponseBody / 约 60MB。
+    const BODY_STORE_MAX_BYTES = 16 * 1024 * 1024;
+    const MAX_INFLIGHT = 8;
+    let bodyBytes = 0;
+    let active = 0;
     const inflight = [];
     const fetched = new Set();
+    const requestInfo = new Map(); // "captureId:requestId" -> {type,url}
+    for (const session of sessions) {
+      for (const ev of eventsByCapture.get(session.captureId) || []) {
+        if (ev.method !== "Network.requestWillBeSent" || !ev.params) continue;
+        if (!ev.params.requestId) continue;
+        requestInfo.set(session.captureId + ":" + ev.params.requestId, {
+          type: String(ev.params.type || "").toLowerCase(),
+          url: (ev.params.request && ev.params.request.url) || "",
+        });
+      }
+    }
+    let filterRe = null;
+    if (opts.filter) {
+      try {
+        filterRe = new RegExp(opts.filter, "i");
+      } catch (_) {}
+    }
+    // 只有"可能被保留"的响应才值得 eager 取体（与结果整形阶段的过滤条件一致）。
+    // 没有 requestWillBeSent 上下文的 loadingFinished 一律不取，留给兜底路径。
+    const wanted = (info) => {
+      if (!info) return false;
+      if (opts.all) return true;
+      if (info.type === "xhr" || info.type === "fetch") return true;
+      return !!(filterRe && filterRe.test(info.url));
+    };
     const t0 = Date.now();
     while (Date.now() - t0 < opts.durationMs) {
       for (const session of sessions) {
@@ -207,7 +250,13 @@ async function doCaptureMany(sendCmd, pairs, opts, eventsByCapture) {
           const rid = ev.params && ev.params.requestId;
           const key = session.captureId + ":" + rid;
           if (!rid || fetched.has(key)) continue;
+          if (!wanted(requestInfo.get(key))) {
+            fetched.add(key);
+            continue;
+          }
+          if (active >= MAX_INFLIGHT) continue; // 配额满：下一轮再取
           fetched.add(key);
+          active++;
           inflight.push(
             sendCmd(
               {
@@ -221,14 +270,22 @@ async function doCaptureMany(sendCmd, pairs, opts, eventsByCapture) {
               20000,
             )
               .then((r) => {
-                if (r.ok && r.result && typeof r.result.body === "string") {
-                  bodyStore.set(key, {
-                    body: r.result.body,
-                    base64Encoded: !!r.result.base64Encoded,
-                  });
-                }
+                if (!r.ok || !r.result || typeof r.result.body !== "string") return;
+                const size = Buffer.byteLength(
+                  r.result.body,
+                  r.result.base64Encoded ? "base64" : "utf8",
+                );
+                if (bodyBytes + size > BODY_STORE_MAX_BYTES) return; // 超预算交给兜底路径
+                bodyBytes += size;
+                bodyStore.set(key, {
+                  body: r.result.body,
+                  base64Encoded: !!r.result.base64Encoded,
+                });
               })
-              .catch(() => {}),
+              .catch(() => {})
+              .finally(() => {
+                active--;
+              }),
           );
         }
       }

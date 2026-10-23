@@ -59,14 +59,6 @@ npm run test:agent # 仅桥
 npm run verify
 ```
 
-## 已知限制
-
-- **`doctor` 的硬刷会杀掉所有 `msedge.exe`**（`taskkill /im`），包括用户自己的窗口，
-  并清理默认 profile 的 `Service Worker` / `Code Cache`。开发机可用，作为对外工具偏激进，
-  正在评估收窄到"只杀本工具启动的实例"。
-- 鉴权当前只防网页（Origin 白名单）：`DEFAULT_TOKEN` 是源码常量，本机进程无需配对即可连接。
-  发布前需重新决策是否恢复真正的配对。
-
 ## 相关仓库
 
 - [synapse](https://github.com/2948985750/synapse) — MV3 扩展与商店发布工具。
