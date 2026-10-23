@@ -18,6 +18,50 @@
 
 ---
 
+## 2026-10-23（晚）— 修掉 review 的 P1/P2 缺口
+
+### BUG-14 `--session` 指定桥不可用时不做故障转移（P1）
+
+- **现象**：`--session a` 的桥进程活着但扩展没拨进来时，命令进入该桥队列，直到 50s 超时。
+- **根因**：`bridgeCandidates` 命中 session 就只返回该桥；而且"连接成功"不等于"扩展在线"。
+- **修法**：候选改为「指定桥排最前 + 其余活桥跟后」；连接后再做一次短超时 `diag` 探活，
+  只有超时/断连才算扩展不在线（扩展回 `ok:false` 说明它活着）。
+
+### BUG-15 级联连接没有总时限（P1）
+
+- **现象**：20 个候选 × 每个 5s，最坏 100s 才失败。
+- **修法**：整条链 15s 总预算（`chainDeadlineMs`），每个候选取剩余预算的较小值。
+
+### BUG-16 cleanup 超时提前释放身份，迟到的 disconnect 会误清新会话（P1）
+
+- **现象**：cleanup 5s 超时后删除 `clients` 条目；扩展稍后真正执行 `client.disconnect` 时，
+  同 clientId 的新会话可能已被清掉。
+- **修法**：超时只回 `CLEANUP_TIMEOUT` 并关掉本地 socket，**保留身份**到扩展 ack 或扩展断开；
+  同时用 `MAX_CLEANUPS`（64）保证有界。
+
+### BUG-17 半开的扩展连接会永久拒绝新扩展（P1）
+
+- **现象**：旧扩展 socket 的 TCP 半开（SW 挂起）时 `readyState` 仍为 1，新扩展被 1008 拒绝。
+- **修法**：记录 `lastExtensionSeen`，静默超过 20s 视为僵尸并替换。
+
+### BUG-18 单连接挂起命令无上限（P2）
+
+- **修法**：每连接在途命令上限 64，超出回 `CLIENT_BUSY`。
+
+### BUG-19 late-start 补偿后 `earlyEvents` 泄漏（P2）
+
+- **修法**：`capture.stop` 补偿时按 captureId 删除对应缓冲。
+
+### BUG-20 `serve`/`keep` 重复接线 + 入口未使用 import（P2）
+
+- **修法**：抽出 `wireBridgeServer()` 两处共用；清理入口 20 个未使用的导入。
+
+### 文档
+
+- `doctor` 明确只实现 Edge 硬刷；Chrome 下命令照常可用，只是不会自动重启浏览器。
+
+---
+
 ## 2026-10-23（下午）— 库入口 + cdp 参数不再走 shell
 
 ### 新增 `agent/api.js`：程序调用入口

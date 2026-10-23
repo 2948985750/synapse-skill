@@ -644,7 +644,7 @@ test("registry: live entries list newest-first, same port deduped, stale entries
   );
   fs.rmSync(dir, { recursive: true, force: true });
 });
-test("registry: session pinning prefers its bridge, falls back to all live bridges when it died", () => {
+test("registry: session pinning puts the pinned bridge first but keeps others as failover", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cdp-bridges-"));
   const legacy = path.join(dir, "legacy.json");
   const alive = (p) => p === process.pid;
@@ -665,7 +665,8 @@ test("registry: session pinning prefers its bridge, falls back to all live bridg
     cli
       .bridgeCandidates({ session: "a" }, dir, legacy, alive)
       .map((e) => e.sid),
-    ["a"],
+    ["a", "b"],
+    "指定会话排最前，其余活桥保留做故障转移（指定桥可能在而扩展不在）",
   );
   assert.deepEqual(
     cli
@@ -677,7 +678,7 @@ test("registry: session pinning prefers its bridge, falls back to all live bridg
   process.env.WB_SESSION = "b";
   assert.deepEqual(
     cli.bridgeCandidates({}, dir, legacy, alive).map((e) => e.sid),
-    ["b"],
+    ["b", "a"],
   );
   delete process.env.WB_SESSION;
   process.env.WB_BRIDGE_FILE = legacy;

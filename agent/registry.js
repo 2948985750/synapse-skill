@@ -135,7 +135,9 @@ function bridgeCandidates(
   const want = opts.session || process.env.WB_SESSION || "";
   if (!want) return all;
   const match = all.filter((e) => e.sid === want);
-  return match.length ? match : all;
+  // 指定会话排最前，但保留其它活桥做故障转移：指定桥可能"进程活着、扩展没拨进来"，
+  // 早先只返回该桥，命令会在这个桥里排队直到 50s 超时，永远不会换桥重试。
+  return match.length ? match.concat(all.filter((e) => e.sid !== want)) : all;
 }
 
 module.exports = {

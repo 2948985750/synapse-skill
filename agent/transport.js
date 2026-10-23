@@ -38,14 +38,49 @@ function bindAgentWs() {
   return attempt(PORT_RANGE_START);
 }
 
+// 级联连接的预算：早先每个候选最多 5s、20 个候选最坏 100s，远超调用方预期。
+const CHAIN_DEADLINE_MS = 15000;
+// 连接成功只代表 TCP+鉴权通过，不代表扩展在线（桥进程可能活着而扩展没拨进来）。
+// 用一次短超时 diag 探活，探不到就换下一个候选。
+const EXT_PROBE_TIMEOUT_MS = 1500;
+
 async function connectBridgeChain(candidates, token, opts, timeoutMs = 5000) {
   let lastError = null;
+  const deadline = Date.now() + (opts.chainDeadlineMs || CHAIN_DEADLINE_MS);
   for (const b of candidates) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    let channel;
     try {
-      const channel = await connectBridge(b, token, opts, timeoutMs);
+      channel = await connectBridge(b, token, opts, Math.min(timeoutMs, remaining));
+      if (!opts.skipExtensionProbe) {
+        // 探活：只有"超时/连接断开"才算扩展不在线；扩展回了 ok:false 也说明它活着。
+        let alive = true;
+        try {
+          await channel.sendCmd(
+            { cmd: "diag" },
+            Math.min(EXT_PROBE_TIMEOUT_MS, Math.max(300, deadline - Date.now())),
+          );
+        } catch (probeError) {
+          alive =
+            probeError.code !== "COMMAND_TIMEOUT" &&
+            !/closed|not open/i.test(probeError.message || "");
+        }
+        if (!alive) {
+          lastError = new Error("bridge " + b.sid + " is up but no extension is attached");
+          await channel.close(true);
+          channel = null;
+          continue;
+        }
+      }
       return { channel, bridge: b };
     } catch (error) {
       lastError = error;
+      if (channel) {
+        try {
+          await channel.close(true);
+        } catch (_) {}
+      }
     }
   }
   const error = new Error(

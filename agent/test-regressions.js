@@ -27,7 +27,7 @@ function fakeSocket(name) {
 
 // bug①：扩展收到 client.disconnect 后不回包（MV3 SW 被挂起）时，
 // 这条客户端必须被超时释放，而不是永久停在 cleaning 状态。
-test("cleanup is released by timeout when the extension never acknowledges", () => {
+test("cleanup timeout replies CLEANUP_TIMEOUT and keeps the identity reserved", () => {
   const timers = [];
   const router = createBridgeRouter({
     setTimer: (fn) => {
@@ -134,4 +134,34 @@ test("api.normalizeEl accepts an index or a snapshot entry", () => {
   assert.throws(() => normalizeEl("3"), /el 需要/);
 });
 
-console.log("ALL-REGRESSIONS-OK (6 cases)");
+
+// 半开扩展：旧 socket readyState 仍是 1，但静默超过阈值时应被新扩展替换，
+// 否则新扩展会被永久 1008 拒绝。
+test("router replaces an extension that has gone silent", () => {
+  let clock = 1000;
+  const router = createBridgeRouter({ now: () => clock });
+  const a = fakeSocket("extA");
+  const b = fakeSocket("extB");
+  assert.equal(router.attachExtension(a), true);
+  clock += 25000;                       // 超过 STALE_EXTENSION_MS(20s)
+  assert.equal(router.attachExtension(b), true, "静默过久的旧扩展应被替换");
+  assert.equal(router.attachExtension(fakeSocket("extC")), false, "刚接上的扩展应被保护");
+});
+
+// 每连接的挂起命令上限：早先 pending 无界，单客户端可无限灌。
+test("router caps in-flight commands per connection", () => {
+  const router = createBridgeRouter();
+  const client = fakeSocket("client");
+  const extension = fakeSocket("extension");
+  router.addClient(client);
+  router.attachExtension(extension);
+  for (let i = 0; i < 64; i++) {
+    router.clientMessage(client, { type: "cmd", id: "c" + i, clientId: "k", cmd: "list", args: {}, timeoutMs: 5000 });
+  }
+  router.clientMessage(client, { type: "cmd", id: "over", clientId: "k", cmd: "list", args: {}, timeoutMs: 5000 });
+  const rejected = client.sent.find((m) => m.id === "over");
+  assert.ok(rejected, "超出上限的命令应被拒绝");
+  assert.equal(rejected.code, "CLIENT_BUSY");
+});
+
+console.log("ALL-REGRESSIONS-OK (8 cases)");

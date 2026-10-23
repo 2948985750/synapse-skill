@@ -9,6 +9,13 @@ const crypto = require("crypto");
 // 不回包就会让这条 socket 永久停在 cleaning=true 并留在 clients 里 —— 常驻 serve
 // 跑几天会攒下一堆僵尸连接。超时后按"未确认"处理并释放身份。
 const CLEANUP_TIMEOUT_MS = 5000;
+// 扩展 socket 静默超过这个时长就认为它已半开（SW 挂起但 TCP 未断），允许新扩展替换。
+const STALE_EXTENSION_MS = 20000;
+// 每个客户端同时挂在途命令的上限（早先 pending 无界，单客户端可无限灌）。
+const MAX_PENDING_PER_CLIENT = 64;
+// cleanups 上限：超时后保留身份是为了避免"迟到的 disconnect 误清新会话"，
+// 但必须有界，否则扩展永不回包时会一直攒着。
+const MAX_CLEANUPS = 64;
 // lateStarts 是"超时后才回来的 capture.start"的补偿队列，必须有上限。
 const LATE_STARTS_MAX = 200;
 
@@ -25,6 +32,7 @@ function createBridgeRouter({
   const cleanups = new Map();
   const lateStarts = new Map();
   const earlyEvents = new Map();
+  let lastExtensionSeen = 0;
 
   function send(socket, message) {
     if (!socket || socket.readyState !== 1) return false;
@@ -81,11 +89,19 @@ function createBridgeRouter({
   }
   function attachExtension(socket) {
     if (extension && extension !== socket && extension.readyState === 1) {
-      // Keep a stable browser identity instead of silently switching profiles.
-      socket.close(1008, "An extension is already connected");
-      return false;
+      // 稳定身份优先；但旧连接可能是"半开"的（SW 挂起、TCP 还在），
+      // 那种情况下新扩展会被永久 1008 拒绝，所以静默超过阈值就替换。
+      if (now() - lastExtensionSeen < STALE_EXTENSION_MS) {
+        socket.close(1008, "An extension is already connected");
+        return false;
+      }
+      try {
+        extension.terminate();
+      } catch (_) {}
+      extension = null;
     }
     extension = socket;
+    lastExtensionSeen = now();
     for (const entry of [...queue]) {
       const index = queue.indexOf(entry);
       if (index !== -1) queue.splice(index, 1);
@@ -177,6 +193,18 @@ function createBridgeRouter({
       dispatched: false,
       timer: null,
     };
+    let mine = 0;
+    for (const other of pending.values()) if (other.socket === socket) mine++;
+    if (mine >= MAX_PENDING_PER_CLIENT) {
+      send(socket, {
+        type: "agent.result",
+        id: message.id,
+        ok: false,
+        error: "Too many in-flight commands on this connection",
+        code: "CLIENT_BUSY",
+      });
+      return;
+    }
     pending.set(entry.wireId, entry);
     entry.timer = setTimer(
       () => expire(entry),
@@ -197,6 +225,7 @@ function createBridgeRouter({
   }
   function extensionMessage(socket, message) {
     if (socket !== extension || !message) return;
+    lastExtensionSeen = now();
     if (message.type === "agent.result") {
       const cleanup = cleanups.get(message.id);
       if (cleanup) {
@@ -210,7 +239,9 @@ function createBridgeRouter({
       const late = lateStarts.get(message.id);
       if (late) {
         lateStarts.delete(message.id);
-        if (message.ok && message.result?.captureId)
+        if (message.ok && message.result?.captureId) {
+          // 这条 capture 已被补偿停止，之前缓冲的早期事件不再需要。
+          earlyEvents.delete(message.result.captureId);
           send(extension, {
             type: "cmd",
             id: crypto.randomUUID(),
@@ -224,6 +255,7 @@ function createBridgeRouter({
             timeoutMs: 5000,
             deadlineAt: now() + 5000,
           });
+        }
         return;
       }
       const entry = pending.get(message.id);
@@ -311,8 +343,9 @@ function createBridgeRouter({
     const id = crypto.randomUUID();
     const timer = setTimer(() => {
       if (!cleanups.has(id)) return;
-      cleanups.delete(id);
-      clients.delete(socket);
+      // 不释放 identity：扩展可能稍后才真正执行这条 disconnect；若此时同 clientId 的
+      // 新会话已建立，提前释放会让迟到的清理误伤新会话。这里只回超时并关掉本地 socket，
+      // 身份留到扩展 ack 或扩展断开时回收；同时用 MAX_CLEANUPS 保证有界。
       if (replyId)
         send(socket, {
           type: "agent.result",
@@ -321,6 +354,16 @@ function createBridgeRouter({
           error: "Client cleanup was not acknowledged in time",
           code: "CLEANUP_TIMEOUT",
         });
+      try {
+        socket.close(1008, "cleanup timeout");
+      } catch (_) {}
+      while (cleanups.size > MAX_CLEANUPS) {
+        const oldest = cleanups.keys().next().value;
+        const stale = cleanups.get(oldest);
+        cleanups.delete(oldest);
+        if (stale && stale.timer) clearTimer(stale.timer);
+        if (stale) clients.delete(stale.socket);
+      }
     }, CLEANUP_TIMEOUT_MS);
     if (timer && typeof timer.unref === "function") timer.unref();
     cleanups.set(id, { socket, client, replyId, timer });

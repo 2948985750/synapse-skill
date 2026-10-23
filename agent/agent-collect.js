@@ -3,31 +3,22 @@
 // Paths are no longer hard-coded to the skill source dir; they resolve through
 // ./paths.js so WB_DATA_DIR / WB_BRIDGE_FILE / WB_BRIDGE_DIR / WB_CDP_EXT_DIR
 // can point runtime data and the unpacked extension wherever the user wants.
-const { WebSocketServer, WebSocket } = require("./vendor/ws");
+
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { execSync, spawn } = require("child_process");
+
 const { createBridgeRouter } = require("./bridge-router");
-const {
-  readToken,
-  authenticateServer,
-  authenticateClient,
-} = require("./bridge-auth");
+const { readToken, authenticateServer } = require("./bridge-auth");
 const {
   BRIDGE_DIR,
   BRIDGE_FILE,
   resolveExtDir: _pathsResolveExtDir,
 } = require("./paths");
 const registry = require("./registry");
-const { renderUsage } = require("./commands");
-const { readJson, writeJsonAtomic, unlinkQuiet } = require("./lib/json-store");
+
 const { wait, failReply, failEvaluation, writeFailure } = require("./lib/ui");
-const {
-  buildCaptureSessionResult,
-  triggerCapture,
-  doCaptureMany,
-} = require("./capture");
+const { buildCaptureSessionResult, doCaptureMany } = require("./capture");
 const {
   bindAgentWs,
   createChannel,
@@ -36,45 +27,11 @@ const {
   connectBridgeChain,
   executeCommand,
 } = require("./transport");
-const {
-  summarizeDiag,
-  probeStatusSnapshot,
-  runStatus,
-  dataDir,
-  maintenanceLockFile,
-  appendMaintenanceLog,
-  acquireMaintenanceLock,
-  releaseMaintenanceLock,
-  findEdgeExe,
-  killAllEdge,
-  clearSwCaches,
-  launchEdge,
-  startProbeServer,
-  runDoctor,
-} = require("./doctor");
+const { probeStatusSnapshot, runStatus, maintenanceLockFile, acquireMaintenanceLock, releaseMaintenanceLock, findEdgeExe, startProbeServer, runDoctor } = require("./doctor");
 const { usage, parseArgs, buildCmd, validateOptions } = require("./cli");
+const { SID_RE, readBridge, writeBridge, unlinkBridge, writeRegistryEntry, unlinkRegistryEntry, pidAlive, readLiveEntry, listLiveBridges, bridgeCandidates, } = registry;
 const {
-  SID_RE,
-  readBridge,
-  writeBridge,
-  unlinkBridge,
-  writeRegistryEntry,
-  unlinkRegistryEntry,
-  pidAlive,
-  readLiveEntry,
-  listLiveBridges,
-  bridgeCandidates,
-} = registry;
-const {
-  PORT_RANGE_START,
-  PORT_RANGE_END,
-  CMD_TIMEOUT_MS,
-  STATUS_TIMEOUT_MS,
-  MAINT_LOCK_TTL_MS,
-} = require("./config");
-
-
-
+  PORT_RANGE_START, STATUS_TIMEOUT_MS } = require("./config");
 
 // 写注册表失败时必须先关掉监听再抛错：早先 writeRegistryEntry 裸调，
 // srv 仍持有事件循环，进程会"报错但活着"，用户看到 JSON 错误却关不掉窗口。
@@ -91,23 +48,9 @@ async function registerOrCleanup(srv, session, port) {
 }
 
 // 逐个试连候选桥（连接层故障转移；命令尚未发出，安全）。全失败抛 NO_BRIDGE。
-async function runServe(sid, token, opts = {}) {
-  const { srv, port } = await bindAgentWs();
-  const router = createBridgeRouter();
-  const session = SID_RE.test(sid)
-    ? sid
-    : "b-" + crypto.randomBytes(3).toString("hex");
-  await registerOrCleanup(srv, session, port);
-  // --shared：额外写遗留单文件（data/bridge.json 或 WB_BRIDGE_FILE），供未升级脚本发现。
-  if (opts.shared) {
-    try {
-      writeBridge(port);
-    } catch (error) {
-      console.error(
-        "[serve] shared bridge record write failed: " + error.message,
-      );
-    }
-  }
+// serve 与 keep 共用同一套连接接线：鉴权 → 分角色（extension/client）→ 消息分发。
+// 两处早先是逐字复制的，协议一改就要同步改两遍。
+function wireBridgeServer(srv, router, token) {
   srv.on("connection", (socket, request) => {
     let role = null;
     socket.on("close", () => router.disconnect(socket));
@@ -128,6 +71,26 @@ async function runServe(sid, token, opts = {}) {
       });
     });
   });
+}
+
+async function runServe(sid, token, opts = {}) {
+  const { srv, port } = await bindAgentWs();
+  const router = createBridgeRouter();
+  const session = SID_RE.test(sid)
+    ? sid
+    : "b-" + crypto.randomBytes(3).toString("hex");
+  await registerOrCleanup(srv, session, port);
+  // --shared：额外写遗留单文件（data/bridge.json 或 WB_BRIDGE_FILE），供未升级脚本发现。
+  if (opts.shared) {
+    try {
+      writeBridge(port);
+    } catch (error) {
+      console.error(
+        "[serve] shared bridge record write failed: " + error.message,
+      );
+    }
+  }
+  wireBridgeServer(srv, router, token);
   console.error(
     "[serve] session=" +
       session +
@@ -162,26 +125,7 @@ async function runKeep(command, token, opts) {
     ? rawSid
     : "k-" + crypto.randomBytes(3).toString("hex");
   await registerOrCleanup(srv, session, port);
-  srv.on("connection", (socket, request) => {
-    let role = null;
-    socket.on("close", () => router.disconnect(socket));
-    authenticateServer(socket, request, token, (authenticatedRole) => {
-      role = authenticatedRole;
-      if (role === "extension") {
-        if (!router.attachExtension(socket)) return;
-      } else router.addClient(socket);
-      socket.on("message", (raw) => {
-        let message;
-        try {
-          message = JSON.parse(raw.toString());
-        } catch (_) {
-          return;
-        }
-        if (role === "extension") router.extensionMessage(socket, message);
-        else router.clientMessage(socket, message);
-      });
-    });
-  });
+  wireBridgeServer(srv, router, token);
   console.error(
     "[keep] session=" +
       session +
