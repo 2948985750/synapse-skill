@@ -18,6 +18,15 @@
 
 ---
 
+### BUG-21 入口 barrel 收窄 + 测试改用模块直连（P2）
+
+- `agent-collect.js` 的导出从 30 项收窄到 `{ main }`；测试不再通过入口拿内部函数。
+- `test-bridge.js` 改为直接 require `cli` / `registry` / `transport` / `capture` / `doctor` / `paths`。
+- 顺带清掉入口里 20 余个只为导出而存在的导入。
+- 验证：28 + 19 命令 + 8 回归全绿。
+
+---
+
 ## 2026-10-23（晚）— 修掉 review 的 P1/P2 缺口
 
 ### BUG-14 `--session` 指定桥不可用时不做故障转移（P1）

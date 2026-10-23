@@ -11,7 +11,17 @@ const { createBridgeRouter } = require("./bridge-router");
 const { authenticateServer, authenticateClient } = require("./bridge-auth");
 const { WebSocketServer, WebSocket } = require("./vendor/ws");
 const auth = require("./ws-auth");
-const cli = require("./agent-collect");
+const { parseArgs, buildCmd } = require("./cli");
+const { bridgeCandidates, listLiveBridges } = require("./registry");
+const { connectBridgeChain, executeCommand } = require("./transport");
+const { buildCaptureSessionResult, doCaptureMany } = require("./capture");
+const {
+  acquireMaintenanceLock,
+  releaseMaintenanceLock,
+  maintenanceLockFile,
+  startProbeServer,
+} = require("./doctor");
+const { resolveExtDir } = require("./paths");
 class Socket extends EventEmitter {
   constructor() {
     super();
@@ -215,7 +225,7 @@ test("capture includes CDP XHR and Fetch with non-JSON MIME", async () => {
       },
     },
   ]);
-  const result = await cli.buildCaptureSessionResult(
+  const result = await buildCaptureSessionResult(
     async () => ({ ok: true, result: { body: "ok" } }),
     { tabId: 1, action: "wait", captureId: "cap" },
     events,
@@ -240,7 +250,7 @@ test("trigger JS executes after capture registration and failure always stops ca
     return { ok: true, result: {} };
   };
   await assert.rejects(
-    cli.doCaptureMany(
+    doCaptureMany(
       send,
       [{ tabId: 1, action: "wait" }],
       { durationMs: 1, triggerJs: "throw Error('x')" },
@@ -258,7 +268,7 @@ test("trigger JS executes after capture registration and failure always stops ca
 test("capture start partial failure cleans previous sessions", async () => {
   const calls = [];
   await assert.rejects(
-    cli.doCaptureMany(
+    doCaptureMany(
       async (command) => {
         calls.push(command);
         if (command.cmd === "capture.start" && command.args.tabId === 2)
@@ -278,7 +288,7 @@ test("capture start partial failure cleans previous sessions", async () => {
 });
 test("failed protocol replies become errors, not successful result strings", async () => {
   await assert.rejects(
-    cli.executeCommand(
+    executeCommand(
       { sendCmd: async () => ({ ok: false, error: "tab closed" }) },
       { cmd: "navigate" },
       {},
@@ -585,23 +595,23 @@ test("unauthenticated business frames cannot select an extension socket", async 
 });
 test("run awaits by default, --sync skips; --nowait zeros open/navigate wait; open-frame builds", () => {
   assert.equal(
-    cli.buildCmd(["run", "1", "1+1"]).args.params.awaitPromise,
+    buildCmd(["run", "1", "1+1"]).args.params.awaitPromise,
     true,
   );
   assert.equal(
-    cli.buildCmd(["run", "1", "1+1"], { sync: true }).args.params.awaitPromise,
+    buildCmd(["run", "1", "1+1"], { sync: true }).args.params.awaitPromise,
     false,
   );
-  assert.equal(cli.buildCmd(["open", "https://x/"]).args.waitMs, undefined);
+  assert.equal(buildCmd(["open", "https://x/"]).args.waitMs, undefined);
   assert.equal(
-    cli.buildCmd(["open", "https://x/"], { nowait: true }).args.waitMs,
+    buildCmd(["open", "https://x/"], { nowait: true }).args.waitMs,
     0,
   );
   assert.equal(
-    cli.buildCmd(["navigate", "1", "https://x/"], { nowait: true }).args.waitMs,
+    buildCmd(["navigate", "1", "https://x/"], { nowait: true }).args.waitMs,
     0,
   );
-  assert.deepEqual(cli.buildCmd(["open-frame", "1", "example"]).args, {
+  assert.deepEqual(buildCmd(["open-frame", "1", "example"]).args, {
     tabId: 1,
     urlPattern: "example",
   });
@@ -628,7 +638,7 @@ test("registry: live entries list newest-first, same port deduped, stale entries
     path.join(dir, "stale.json"),
     JSON.stringify({ sid: "stale", pid: 999999, port: 9525, ts: base + 9 }),
   );
-  const list = cli.listLiveBridges(dir, legacy, alive);
+  const list = listLiveBridges(dir, legacy, alive);
   // b(ts3) 与 legacy(ts2, sid "default") 同端口 9522：ts 高者（注册表 b）胜出；9521=a。
   assert.deepEqual(
     list.map((e) => [e.port, e.sid]),
@@ -657,27 +667,25 @@ test("registry: session pinning puts the pinned bridge first but keeps others as
   write("b", 9522, 2);
   delete process.env.WB_BRIDGE_FILE;
   assert.deepEqual(
-    cli.bridgeCandidates({}, dir, legacy, alive).map((e) => e.sid),
+    bridgeCandidates({}, dir, legacy, alive).map((e) => e.sid),
     ["b", "a"],
     "newest-first when no session pinning",
   );
   assert.deepEqual(
-    cli
-      .bridgeCandidates({ session: "a" }, dir, legacy, alive)
+    bridgeCandidates({ session: "a" }, dir, legacy, alive)
       .map((e) => e.sid),
     ["a", "b"],
     "指定会话排最前，其余活桥保留做故障转移（指定桥可能在而扩展不在）",
   );
   assert.deepEqual(
-    cli
-      .bridgeCandidates({ session: "gone" }, dir, legacy, alive)
+    bridgeCandidates({ session: "gone" }, dir, legacy, alive)
       .map((e) => e.sid),
     ["b", "a"],
     "dead session bridge fails over to remaining live bridges",
   );
   process.env.WB_SESSION = "b";
   assert.deepEqual(
-    cli.bridgeCandidates({}, dir, legacy, alive).map((e) => e.sid),
+    bridgeCandidates({}, dir, legacy, alive).map((e) => e.sid),
     ["b", "a"],
   );
   delete process.env.WB_SESSION;
@@ -687,7 +695,7 @@ test("registry: session pinning puts the pinned bridge first but keeps others as
     JSON.stringify({ pid: process.pid, port: 9522, ts: 5 }),
   );
   assert.deepEqual(
-    cli.bridgeCandidates({}, dir, legacy, alive).map((e) => e.sid),
+    bridgeCandidates({}, dir, legacy, alive).map((e) => e.sid),
     ["default"],
     "WB_BRIDGE_FILE override is exclusive (legacy dual-instance)",
   );
@@ -695,8 +703,8 @@ test("registry: session pinning puts the pinned bridge first but keeps others as
   fs.rmSync(dir, { recursive: true, force: true });
 });
 test("serve takes a positional session id", () => {
-  assert.deepEqual(cli.buildCmd(["serve", "b"]).args, { sid: "b" });
-  assert.deepEqual(cli.buildCmd(["serve"]).args, { sid: "" });
+  assert.deepEqual(buildCmd(["serve", "b"]).args, { sid: "b" });
+  assert.deepEqual(buildCmd(["serve"]).args, { sid: "" });
 });
 test("failover: an unreachable bridge hands off to the next live bridge", async () => {
   const token = auth.DEFAULT_TOKEN;
@@ -731,7 +739,7 @@ test("failover: an unreachable bridge hands off to the next live bridge", async 
       { sid: "first", pid: process.pid, port: dead.port, ts: 2 },
       { sid: "second", pid: process.pid, port: live.port, ts: 1 },
     ];
-    const picked = await cli.connectBridgeChain(
+    const picked = await connectBridgeChain(
       candidates,
       token,
       { clientId: "t", transientClient: true },
@@ -750,36 +758,36 @@ test("failover: an unreachable bridge hands off to the next live bridge", async 
 test("doctor lock: single holder, live contention times out, stale lock is stolen", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cdp-maint-"));
   try {
-    const a = await cli.acquireMaintenanceLock(5000, dir);
+    const a = await acquireMaintenanceLock(5000, dir);
     assert.equal(a.acquired, true);
-    const b = await cli.acquireMaintenanceLock(2000, dir);
+    const b = await acquireMaintenanceLock(2000, dir);
     assert.equal(b.acquired, false);
     assert.equal(
       b.holder.pid,
       process.pid,
       "live holder is reported, not stolen",
     );
-    cli.releaseMaintenanceLock(a);
-    const c = await cli.acquireMaintenanceLock(5000, dir);
+    releaseMaintenanceLock(a);
+    const c = await acquireMaintenanceLock(5000, dir);
     assert.equal(c.acquired, true, "lock is free after release");
-    cli.releaseMaintenanceLock(c);
+    releaseMaintenanceLock(c);
     // 残留锁（持锁者被强杀 / 超 TTL）→ 窃取
     fs.writeFileSync(
-      cli.maintenanceLockFile
-        ? cli.maintenanceLockFile(dir)
+      maintenanceLockFile
+        ? maintenanceLockFile(dir)
         : path.join(dir, "maintenance.lock.json"),
       JSON.stringify({ pid: 999999, ts: Date.now() }),
     );
-    const d = await cli.acquireMaintenanceLock(5000, dir);
+    const d = await acquireMaintenanceLock(5000, dir);
     assert.equal(d.acquired, true, "stale lock (dead holder pid) is stolen");
-    cli.releaseMaintenanceLock(d);
+    releaseMaintenanceLock(d);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 test("doctor probe server detects an authenticating extension dial-in", async () => {
   const token = auth.DEFAULT_TOKEN;
-  const probe = cli.startProbeServer(token, 15000);
+  const probe = startProbeServer(token, 15000);
   const port = await probe.portReady;
   const sock = new WebSocket("ws://127.0.0.1:" + port);
   sock.on("error", () => {});
@@ -815,8 +823,8 @@ test("doctor probe server detects an authenticating extension dial-in", async ()
   }
 });
 test("doctor builds as a command", () => {
-  assert.equal(cli.buildCmd(["doctor"]).cmd, "doctor");
-  const opts = cli.parseArgs(["doctor", "--force", "--dry", "--wait", "3000"]);
+  assert.equal(buildCmd(["doctor"]).cmd, "doctor");
+  const opts = parseArgs(["doctor", "--force", "--dry", "--wait", "3000"]);
   assert.equal(opts.force, true);
   assert.equal(opts.dry, true);
   assert.equal(opts.waitMs, 3000);
@@ -840,11 +848,11 @@ test("resolveExtDir: WB_CDP_EXT_DIR 指向无 manifest 的目录必须报错，�
   }
   // WB_CDP_EXT_DIR 指到无 manifest 的目录（如 <valid>/src）→ 必须抛错
   process.env.WB_CDP_EXT_DIR = path.join(valid, "src");
-  assert.throws(() => cli.resolveExtDir(), /manifest\.json/);
+  assert.throws(() => resolveExtDir(), /manifest\.json/);
   // 指向合法扩展根 → 原样返回
   process.env.WB_CDP_EXT_DIR = valid;
   assert.equal(
-    cli.resolveExtDir().replace(/\\/g, "/"),
+    resolveExtDir().replace(/\\/g, "/"),
     valid.replace(/\\/g, "/"),
   );
   delete process.env.WB_CDP_EXT_DIR;
@@ -852,7 +860,7 @@ test("resolveExtDir: WB_CDP_EXT_DIR 指向无 manifest 的目录必须报错，�
   // 推导不到时抛"找不到 unpacked 扩展根目录"（独立 skill 形态下扩展不在本目录内，属预期）。
   // 本机恰好有候选时直接通过，没有则报错——两者都证明 resolveExtDir 做了 manifest 校验。
   try {
-    cli.resolveExtDir();
+    resolveExtDir();
   } catch (e) {
     assert.match(String(e.message), /manifest\.json|unpacked 扩展根目录/);
   }

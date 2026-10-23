@@ -10,28 +10,26 @@ const crypto = require("crypto");
 
 const { createBridgeRouter } = require("./bridge-router");
 const { readToken, authenticateServer } = require("./bridge-auth");
+const { resolveExtDir: _pathsResolveExtDir } = require("./paths");
 const {
-  BRIDGE_DIR,
-  BRIDGE_FILE,
-  resolveExtDir: _pathsResolveExtDir,
-} = require("./paths");
-const registry = require("./registry");
-
-const { wait, failReply, failEvaluation, writeFailure } = require("./lib/ui");
-const { buildCaptureSessionResult, doCaptureMany } = require("./capture");
+  SID_RE,
+  writeBridge,
+  unlinkBridge,
+  writeRegistryEntry,
+  unlinkRegistryEntry,
+  bridgeCandidates,
+} = require("./registry");
+const { wait, writeFailure } = require("./lib/ui");
 const {
   bindAgentWs,
-  createChannel,
   connectBridge,
   connectDirect,
   connectBridgeChain,
   executeCommand,
 } = require("./transport");
-const { probeStatusSnapshot, runStatus, maintenanceLockFile, acquireMaintenanceLock, releaseMaintenanceLock, findEdgeExe, startProbeServer, runDoctor } = require("./doctor");
+const { probeStatusSnapshot, runStatus, runDoctor } = require("./doctor");
 const { usage, parseArgs, buildCmd, validateOptions } = require("./cli");
-const { SID_RE, readBridge, writeBridge, unlinkBridge, writeRegistryEntry, unlinkRegistryEntry, pidAlive, readLiveEntry, listLiveBridges, bridgeCandidates, } = registry;
-const {
-  PORT_RANGE_START, STATUS_TIMEOUT_MS } = require("./config");
+const { STATUS_TIMEOUT_MS } = require("./config");
 
 // 写注册表失败时必须先关掉监听再抛错：早先 writeRegistryEntry 裸调，
 // srv 仍持有事件循环，进程会"报错但活着"，用户看到 JSON 错误却关不掉窗口。
@@ -247,38 +245,4 @@ async function main(argv = process.argv.slice(2)) {
   }
 }
 if (require.main === module) main().catch(writeFailure);
-module.exports = {
-  parseArgs,
-  buildCmd,
-  main,
-  createChannel,
-  connectBridge,
-  runStatus,
-  failReply,
-  failEvaluation,
-  writeFailure,
-  doCaptureMany,
-  buildCaptureSessionResult,
-  executeCommand,
-  validateOptions,
-  readBridge,
-  writeRegistryEntry,
-  unlinkRegistryEntry,
-  pidAlive,
-  readLiveEntry,
-  listLiveBridges,
-  bridgeCandidates,
-  connectBridgeChain,
-  runKeep,
-  runServe,
-  BRIDGE_DIR,
-  BRIDGE_FILE,
-  probeStatusSnapshot,
-  runDoctor,
-  startProbeServer,
-  acquireMaintenanceLock,
-  releaseMaintenanceLock,
-  maintenanceLockFile,
-  findEdgeExe,
-  resolveExtDir,
-};
+module.exports = { main };
