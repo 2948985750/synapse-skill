@@ -67,7 +67,7 @@ daemon 被强杀留下的死条目，下次发现时自动清理。
 - 桥活但扩展黑坑（MV3 SW 挂起）：`bridgeAlive:true + extension:null` → 跑 `doctor`。
 - `doctor`：快查 → 礼貌等待 60s（探针端口 / 活桥 SW 重拨）→ 维护锁内协调硬刷。
   **多会话统一走 doctor，不要各自手杀浏览器**（注意：当前硬刷是 `taskkill /im msedge.exe`，
-  会连带用户自己的 Edge 窗口，见 README 的「已知限制」）。
+  会连带用户自己的 Edge 窗口，调用前先确认没有正在进行的浏览任务）。
 
 ## 路径
 
