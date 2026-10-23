@@ -41,4 +41,22 @@ for (const command of COMMANDS) {
 assert.ok(text.startsWith("用法:"), "usage 开头固定为「用法:」");
 assert.ok(text.includes("--session <sid>"), "usage 必须列出 --session");
 
+
+// 交互参数形态：索引直传（避免 PowerShell 吃掉 JSON 引号），旧 JSON 写法仍兼容。
+{
+  const { buildCmd } = require("./cli");
+  assert.deepStrictEqual(buildCmd(["click-el", "17", "3"], {}).args.el, { i: 3 });
+  assert.deepStrictEqual(
+    buildCmd(["click-el", "17", "3"], { label: "搜索" }).args.el,
+    { i: 3, label: "搜索" },
+  );
+  assert.deepStrictEqual(
+    buildCmd(["click-el", "17", '{"i":3,"tag":"button","label":"搜索"}'], {}).args.el,
+    { i: 3, tag: "button", label: "搜索" },
+  );
+  assert.deepStrictEqual(buildCmd(["type-el", "17", "2", "hello"], {}).args.el, { i: 2 });
+  assert.equal(buildCmd(["type-el", "17", "2", "hello"], {}).args.text, "hello");
+  console.log("ALL-EL-ARGS-OK (bare index + legacy json)");
+}
+
 console.log("ALL-COMMANDS-OK (" + NAMES.length + " commands, table === implementation)");

@@ -9,6 +9,19 @@
 
 ## 2026-10-23 — 配对闭环 + 两个 P1
 
+### BUG-13 交互命令要求 JSON 走 argv，在 PowerShell 里用不了（P1 易用性）
+
+- **现象**：`click-el <tabId> '{"i":0,"tag":"a","label":"Learn more"}'` 在 PowerShell 5.1 里
+  双引号被 shell 吃掉，JSON 解析失败 → 直接打印 usage。`type-el` 同。
+  这正是早期 `tools/agent-run.js` 存在的理由，而那个目录已被删除，等于把坑留给了使用方。
+- **根因**：快照索引本身是标准化的（`snapshot` 给 `{i,tag,role,label}`），但把"索引"这个
+  简单整数包在 JSON 里当 argv 传，等于让 shell 参与序列化。
+- **修法**：`click-el <tabId> <i>` / `type-el <tabId> <i> <text>` 直接接受裸索引；
+  旧的完整 JSON 写法仍然兼容；新增可选的 `--label <text>` 参与漂移校验。
+- **实测**：`click-el 1961500280 0 --session clickidx` → `found:true, clicked:"Learn more"`，
+  页面跳转到 iana.org。
+- **测试**：`test-commands` 增加裸索引与旧 JSON 两种形态的解析断言。
+
 ### BUG-12 capture 没有资源上界（P1）
 
 - **15 分钟会话**：扩展侧 `durationMs` 是 `opts.durationMs + 900000`，每次 capture 都在扩展里

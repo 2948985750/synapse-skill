@@ -91,20 +91,20 @@ const COMMANDS = [
   {
     name: "click-el",
     lines: [
-      "click-el <tabId> '<el-json>' （按 snapshot 条目点击；执行前重解析校验，漂移报 found:false）",
+      "click-el <tabId> <i|el-json> [--label <text>] （按 snapshot 索引点击；--label 参与漂移校验）",
     ],
   },
   {
     name: "type-el",
     lines: [
-      "type-el <tabId> '<el-json>' <text> [--clear] （按条目键入，兼容受控组件）",
-      '（el-json 形如 {"i":3,"tag":"button","label":"搜索"}；免手写选择器，来自 snapshot）',
+      "type-el <tabId> <i|el-json> <text> [--clear] [--label <text>] （按索引键入，兼容受控组件）",
+      "（<i> 来自 snapshot 条目的 i，例如 click-el 17 3；旧的完整 JSON 写法仍然兼容）",
     ],
   },
 ];
 
 const FOOTER = [
-  "选项: --wait <ms>  --keep  --max <N>  --clear  --sync  --nowait  --client-id <id>  --trigger-js <expr>  --session <sid>  --shared  --force  --dry",
+  "选项: --wait <ms>  --keep  --max <N>  --clear  --label <text>  --sync  --nowait  --client-id <id>  --trigger-js <expr>  --session <sid>  --shared  --force  --dry",
   "多会话: WB_SESSION=<sid>（本会话 one-shot 优先走 data/bridges/<sid>.json）；--keep 也会注册",
   "        为临时会话桥（注册表条目 + 允许多客户端），供同会话后续 one-shot 毫秒级复用",
 ];

@@ -23,6 +23,7 @@ function parseArgs(argv) {
   // snapshot/click-el/type-el 选项
   let snapMax = 50;
   let clear = false;
+  let label = "";
   let triggerJs = "";
   let clientId = process.env.WB_CLIENT_ID || "";
   // --sync：run 不带 awaitPromise（fire-and-forget，副作用用 window 寄存后二次 run 查询）。
@@ -47,6 +48,7 @@ function parseArgs(argv) {
     else if (a === "--all") all = true;
     else if (a === "--max") snapMax = Number(argv[++i]) || snapMax;
     else if (a === "--clear") clear = true;
+    else if (a === "--label") label = argv[++i] || "";
     else if (a === "--trigger-js") triggerJs = argv[++i] || "";
     else if (a === "--client-id") clientId = argv[++i] || "";
     else if (a === "--sync") sync = true;
@@ -67,6 +69,7 @@ function parseArgs(argv) {
     all,
     snapMax,
     clear,
+    label,
     triggerJs,
     clientId,
     sync,
@@ -81,6 +84,24 @@ function parseArgs(argv) {
 function buildCmd(rest, opts = {}) {
   const snapMax = opts.snapMax || 50;
   const clear = !!opts.clear;
+  const labelOpt = opts.label || "";
+  // el 参数两种写法都接受：
+  //   click-el <tab> 3                 ← 裸索引（PowerShell/cmd 里不用碰 JSON 引号）
+  //   click-el <tab> '{"i":3,...}'     ← 兼容旧写法（完整快照条目）
+  // 索引由 snapshot 给出，扩展端执行前仍会重解析校验（越界/label 漂移 → found:false）。
+  function parseElArg(raw, label) {
+    const text = String(raw).trim();
+    if (/^\d+$/.test(text)) {
+      const el = { i: Number(text) };
+      if (label) el.label = label;
+      return el;
+    }
+    try {
+      const el = JSON.parse(text);
+      if (el && typeof el.i === "number") return label ? { ...el, label } : el;
+    } catch (_) {}
+    return null;
+  }
   const [cmd, ...args] = rest;
   switch (cmd) {
     case "list":
@@ -183,29 +204,19 @@ function buildCmd(rest, opts = {}) {
     case "click-el": {
       // <tabId> <el-json>：el-json = snapshot 返回条目 {"i":3,"tag":"button","label":"搜索"}
       // 扩展端执行前重解析校验（索引越界/label 漂移 → found:false 不执行）。
-      const [tabId, elJson] = args;
-      if (!tabId || !elJson) usage();
-      let el;
-      try {
-        el = JSON.parse(elJson);
-      } catch (_) {
-        el = null;
-      }
-      if (!el || typeof el.i !== "number") usage();
+      const [tabId, elArg] = args;
+      if (!tabId || !elArg) usage();
+      const el = parseElArg(elArg, labelOpt);
+      if (!el) usage();
       return { cmd: "click-el", args: { tabId: Number(tabId), el } };
     }
     case "type-el": {
       // <tabId> <el-json> <text> [--clear]：键入文本（native value setter + input/change
       // 事件，兼容受控组件）；--clear 先清空。
-      const [tabId, elJson, text] = args;
-      if (!tabId || !elJson || text === undefined) usage();
-      let el;
-      try {
-        el = JSON.parse(elJson);
-      } catch (_) {
-        el = null;
-      }
-      if (!el || typeof el.i !== "number") usage();
+      const [tabId, elArg, text] = args;
+      if (!tabId || !elArg || text === undefined) usage();
+      const el = parseElArg(elArg, labelOpt);
+      if (!el) usage();
       return {
         cmd: "type-el",
         args: { tabId: Number(tabId), el, text, clear },
