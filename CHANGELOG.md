@@ -38,6 +38,20 @@
 
 ---
 
+### 变更：数据目录移到用户目录，新增 config 命令（发布前必改）
+
+- **问题**：`DATA_ROOT` 默认是 `<skill>/data`，`--out` 默认是仓库里的 `data/`。
+  装到 Program Files 或由包管理器管理时不可写，升级还会把数据一起覆盖。
+- **新默认**：Windows `%LOCALAPPDATA%\Synapse`、macOS `~/Library/Application Support/Synapse`、
+  Linux `~/.local/share/synapse`（遵守 `XDG_DATA_HOME`）。
+- **解析顺序**：`WB_DATA_DIR`（`SYNAPSE_OUTPUT_DIR`）> `config.json` > 平台默认。
+- **新增命令**：`config` / `config set data-root <dir>` / `config set output-dir <dir>` / `config reset`，
+  首次使用时由使用方指定位置。
+- `registry` 写注册表前自建目录（数据根换成用户目录后首次 serve 目录可能不存在）。
+- 回归测试：默认值、`config` 覆盖、`reset` 回退（10 例）。
+
+---
+
 ## 2026-10-23（晚）— 修掉 review 的 P1/P2 缺口
 
 ### BUG-14 `--session` 指定桥不可用时不做故障转移（P1）

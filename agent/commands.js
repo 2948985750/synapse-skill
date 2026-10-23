@@ -55,6 +55,15 @@ const COMMANDS = [
     ],
   },
   {
+    name: "config",
+    lines: [
+      "config                      （显示数据目录与来源）",
+      "config set data-root <dir>  （用户首次使用时指定数据根）",
+      "config set output-dir <dir> （采集产物根，默认 <data-root>/output）",
+      "config reset                （清掉自定义路径，回到默认）",
+    ],
+  },
+  {
     name: "status",
     lines: [
       "status",

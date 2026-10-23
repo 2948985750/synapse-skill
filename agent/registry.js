@@ -44,6 +44,8 @@ function readBridge() {
 }
 
 function writeBridge(port) {
+  // 数据根现在默认在用户目录，首次 serve 时目录可能还不存在。
+  fs.mkdirSync(path.dirname(BRIDGE_FILE), { recursive: true });
   writeJsonAtomic(BRIDGE_FILE, { pid: process.pid, port, ts: Date.now() });
 }
 
@@ -57,6 +59,7 @@ function unlinkBridge() {
 function writeRegistryEntry(sid, port, dir = BRIDGE_DIR) {
   if (!SID_RE.test(sid))
     throw new Error("Invalid bridge session id " + JSON.stringify(sid));
+  fs.mkdirSync(dir, { recursive: true });
   writeJsonAtomic(path.join(dir, sid + ".json"), {
     sid,
     pid: process.pid,

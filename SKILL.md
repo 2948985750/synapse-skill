@@ -96,10 +96,36 @@ daemon 被强杀留下的死条目，下次发现时自动清理。
   **硬刷只实现了 Edge**（`msedge.exe` + Edge 默认 profile）；用 Chrome 时 `list/open/run`
   等命令照常工作，只是 `doctor` 不会去重启 Chrome，需要手工恢复。
 
-## 路径
+## 路径与数据归属
 
-全部走 `agent/paths.js`（`WB_DATA_DIR` / `WB_BRIDGE_DIR` / `WB_BRIDGE_FILE` /
-`WB_CDP_EXT_DIR` / `WB_EDGE_EXE` / `WB_AGENT_WS_START|END`）。
+**扩展不写盘**（MV3 只有 `chrome.storage.local`，只放诊断日志）。采集结果全部由 node 侧
+决定和落盘，默认在**用户目录**，不在安装目录：
+
+```
+Windows  %LOCALAPPDATA%\Synapse\
+macOS    ~/Library/Application Support/Synapse/
+Linux    ~/.local/share/synapse/        （或 $XDG_DATA_HOME）
+
+<数据根>\
+├── config.json     路径配置（dataRoot / outputDir）
+├── bridges\        桥注册表（每会话一个 json）
+├── output\         采集产物（api-first、experiment…）
+└── maintenance.log doctor 维护日志
+```
+
+解析顺序：`WB_DATA_DIR`（或 `SYNAPSE_OUTPUT_DIR`）> `config.json` > 平台默认。
+
+首次使用时由使用方指定位置：
+
+```powershell
+node agent/agent-collect.js config                       # 看当前路径与来源
+node agent/agent-collect.js config set data-root D:\synapse-data
+node agent/agent-collect.js config set output-dir D:\synapse-data\out
+node agent/agent-collect.js config reset                 # 回到默认
+```
+
+其它可覆盖项：`WB_BRIDGE_DIR` / `WB_BRIDGE_FILE` / `WB_CDP_EXT_DIR` / `WB_EDGE_EXE` /
+`WB_AGENT_WS_START|END`。
 `doctor` 的硬刷需要 `WB_CDP_EXT_DIR` 指向含 `manifest.json` 的扩展根（即 synapse 仓库的 `extension/`）。
 
 ## 测试

@@ -188,6 +188,22 @@ async function main(argv = process.argv.slice(2)) {
   validateOptions(opts);
   opts.transientClient = !opts.clientId;
   opts.clientId = opts.clientId || "cli-" + crypto.randomUUID();
+  if (command.cmd === "config") {
+    // 纯本地：查看/指定数据目录，不连桥、不需要令牌。
+    const paths = require("./paths");
+    const cfgArgs = command.args || {};
+    if (cfgArgs.action === "set") {
+      if (!cfgArgs.value) {
+        throw Object.assign(new Error("config set 需要一个目录，例如 config set data-root D:\\synapse-data"), { code: "INVALID_CONFIG" });
+      }
+      paths.writeConfig({ [cfgArgs.field]: path.resolve(cfgArgs.value) });
+      paths.ensureDataDirs();
+    } else if (cfgArgs.action === "reset") {
+      paths.resetConfig();
+    }
+    process.stdout.write(JSON.stringify(Object.assign({ ok: true }, paths.describePaths()), null, 2) + "\n");
+    return;
+  }
   if (command.cmd === "status") {
     await runStatus(opts);
     return;

@@ -203,6 +203,20 @@ function buildCmd(rest, opts = {}) {
       return { cmd: "close", args: { tabId: Number(args[0]) } };
     case "diag":
       return { cmd: "diag" };
+    case "config": {
+      // 纯本地命令：查看/设置用户数据目录，不需要连桥。
+      const [action, key, value] = args;
+      if (!action) return { cmd: "config", args: { action: "show" } };
+      if (action === "show") return { cmd: "config", args: { action: "show" } };
+      if (action === "reset") return { cmd: "config", args: { action: "reset" } };
+      if (action !== "set" || !key) usage();
+      const allowed = { "data-root": "dataRoot", "output-dir": "outputDir" };
+      const field = allowed[key];
+      if (!field) {
+        throw Object.assign(new Error("未知配置项 " + key + "（可用：data-root | output-dir）"), { code: "INVALID_CONFIG" });
+      }
+      return { cmd: "config", args: { action: "set", field, value: value || "" } };
+    }
     case "status":
       // 快路径健康探测：逐个试连候选桥（详见 main / runViaBridge 里的 status 分支）
       return { cmd: "status" };

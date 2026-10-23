@@ -175,4 +175,31 @@ test("killOwnedEdge does nothing when we never launched a browser", (t) => {
   assert.equal(killOwnedEdge({}, dir), "none", "没有自己的 pid 记录时必须跳过 kill");
 });
 
-console.log("ALL-REGRESSIONS-OK (9 cases)");
+// 数据目录：env > config.json > 平台默认；config set 后当前配置立即生效。
+test("data root resolution prefers config over the platform default", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "synapse-cfg-"));
+  const prevCfg = process.env.WB_CONFIG_FILE;
+  const prevData = process.env.WB_DATA_DIR;
+  delete process.env.WB_DATA_DIR;
+  process.env.WB_CONFIG_FILE = path.join(dir, "config.json");
+  t.after(() => {
+    if (prevCfg === undefined) delete process.env.WB_CONFIG_FILE; else process.env.WB_CONFIG_FILE = prevCfg;
+    if (prevData === undefined) delete process.env.WB_DATA_DIR; else process.env.WB_DATA_DIR = prevData;
+    delete require.cache[require.resolve("./paths")];
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  delete require.cache[require.resolve("./paths")];
+  const paths = require("./paths");
+
+  assert.equal(paths.resolveDataRoot({}).source, "default");
+  const chosen = path.join(dir, "mydata");
+  paths.writeConfig({ dataRoot: chosen });
+  assert.equal(paths.readConfig().dataRoot, chosen);
+  assert.equal(paths.resolveDataRoot(paths.readConfig()).value, chosen);
+  assert.equal(paths.resolveOutputRoot(paths.readConfig(), chosen).value, path.join(chosen, "output"));
+
+  paths.resetConfig();
+  assert.equal(paths.readConfig().dataRoot, undefined, "reset 后回到默认");
+});
+
+console.log("ALL-REGRESSIONS-OK (10 cases)");
