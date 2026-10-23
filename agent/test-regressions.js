@@ -3,6 +3,8 @@
 const test = require("node:test");
 const assert = require("node:assert");
 const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { createBridgeRouter } = require("./bridge-router");
 const { buildCaptureSessionResult } = require("./capture");
 
@@ -164,4 +166,13 @@ test("router caps in-flight commands per connection", () => {
   assert.equal(rejected.code, "CLIENT_BUSY");
 });
 
-console.log("ALL-REGRESSIONS-OK (8 cases)");
+// doctor 默认只杀"本工具启动的" Edge：没有 pid 记录时不应该动用户的浏览器。
+test("killOwnedEdge does nothing when we never launched a browser", (t) => {
+  if (process.platform !== "win32") return t.skip("仅 Windows");
+  const { killOwnedEdge } = require("./doctor");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "synapse-edge-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  assert.equal(killOwnedEdge({}, dir), "none", "没有自己的 pid 记录时必须跳过 kill");
+});
+
+console.log("ALL-REGRESSIONS-OK (9 cases)");

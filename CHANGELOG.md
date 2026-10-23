@@ -27,6 +27,17 @@
 
 ---
 
+### 变更：doctor 默认只杀"自己启动的" Edge
+
+- **旧行为**：`taskkill /f /im msedge.exe /t` —— 会把用户自己开的 Edge 窗口一起带走。
+- **新行为**：`launchEdge` 记录 pid 到 `data/edge.pid`；硬刷时只 `taskkill /pid <记录> /t /f`，
+  没有记录就跳过 kill（日志写 `maintenance.log` 的 `kill-skipped`）。
+- **逃生口**：`doctor --force-kill`（或 `WB_EDGE_KILL_ALL=1`）恢复旧的"杀所有 Edge"。
+- 新增回归测试：没有 pid 记录时 `killOwnedEdge` 必须返回 `none` 且不动浏览器。
+- 文档同步：SKILL.md 的 doctor 段落改成"默认只杀自己的实例 + --force-kill 逃生"。
+
+---
+
 ## 2026-10-23（晚）— 修掉 review 的 P1/P2 缺口
 
 ### BUG-14 `--session` 指定桥不可用时不做故障转移（P1）

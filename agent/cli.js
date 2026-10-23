@@ -54,6 +54,7 @@ function parseArgs(argv) {
   let session = "";
   let shared = false;
   let force = false;
+  let forceKill = false;
   let dry = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -78,6 +79,7 @@ function parseArgs(argv) {
     else if (a === "--session") session = argv[++i] || "";
     else if (a === "--shared") shared = true;
     else if (a === "--force") force = true;
+    else if (a === "--force-kill") forceKill = true;
     else if (a === "--dry") dry = true;
     else rest.push(a);
   }
@@ -100,6 +102,7 @@ function parseArgs(argv) {
     session,
     shared,
     force,
+    forceKill,
     dry,
   };
 }

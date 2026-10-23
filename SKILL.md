@@ -90,8 +90,9 @@ daemon 被强杀留下的死条目，下次发现时自动清理。
 - `status`：<2s 有界探活；无活桥立即 `NO_BRIDGE`，不等不回落。
 - 桥活但扩展黑坑（MV3 SW 挂起）：`bridgeAlive:true + extension:null` → 跑 `doctor`。
 - `doctor`：快查 → 礼貌等待 60s（探针端口 / 活桥 SW 重拨）→ 维护锁内协调硬刷。
-  **多会话统一走 doctor，不要各自手杀浏览器**（注意：当前硬刷是 `taskkill /im msedge.exe`，
-  会连带用户自己的 Edge 窗口，调用前先确认没有正在进行的浏览任务）。
+  **多会话统一走 doctor，不要各自手杀浏览器**。
+  硬刷默认只杀**本工具启动的** Edge（pid 记在 `data/edge.pid`）；要像旧版那样杀所有
+  `msedge.exe`（会连带你自己正在用的窗口）必须显式 `--force-kill`。
   **硬刷只实现了 Edge**（`msedge.exe` + Edge 默认 profile）；用 Chrome 时 `list/open/run`
   等命令照常工作，只是 `doctor` 不会去重启 Chrome，需要手工恢复。
 

@@ -161,17 +161,37 @@ function findEdgeExe() {
   return "msedge.exe"; // 交给 PATH
 }
 
-function killAllEdge() {
+// 记录本工具启动的 Edge pid，下次硬刷只杀自己启动的那一个。
+function edgePidFile(dir = dataDir()) {
+  return path.join(dir, "edge.pid");
+}
+
+// 默认只杀"本工具启动的" Edge（pid 记录来自 launchEdge）。
+// 早先是 taskkill /f /im msedge.exe /t，会把用户自己正在用的窗口一起带走。
+// 需要旧行为时显式传 --force-kill（或设 WB_EDGE_KILL_ALL=1）。
+function killOwnedEdge(opts = {}, dir = dataDir()) {
   if (process.platform !== "win32")
     throw new Error(
       "doctor 硬刷目前仅支持 Windows（taskkill）；其它平台请按 T-17 手工恢复",
     );
+  if (opts.forceKill || process.env.WB_EDGE_KILL_ALL === "1") {
+    try {
+      execSync("taskkill /f /im msedge.exe /t", { stdio: "ignore", timeout: 20000 });
+    } catch (_) {}
+    appendMaintenanceLog({ phase: "kill-all", reason: opts.forceKill ? "force-kill" : "env" }, dir);
+    return "all";
+  }
+  const record = readJson(edgePidFile(dir));
+  if (!record || !Number.isInteger(record.pid) || !pidAlive(record.pid)) {
+    appendMaintenanceLog({ phase: "kill-skipped", reason: "no-owned-edge" }, dir);
+    return "none";
+  }
   try {
-    execSync("taskkill /f /im msedge.exe /t", {
-      stdio: "ignore",
-      timeout: 20000,
-    });
-  } catch (_) {} // 没有 Edge 也算成功
+    execSync("taskkill /pid " + record.pid + " /t /f", { stdio: "ignore", timeout: 20000 });
+  } catch (_) {}
+  unlinkQuiet(edgePidFile(dir));
+  appendMaintenanceLog({ phase: "kill-owned", pid: record.pid }, dir);
+  return "owned";
 }
 
 function clearSwCaches() {
@@ -202,6 +222,9 @@ function launchEdge(exe, extDir = resolveExtDir()) {
   child.on("error", (error) => {
     appendMaintenanceLog({ phase: "edge-launch-failed", error: String(error.message || error) });
   });
+  if (Number.isInteger(child.pid)) {
+    writeJsonAtomic(edgePidFile(), { pid: child.pid, ts: Date.now() });
+  }
   child.unref();
   return extDir;
 }
@@ -411,7 +434,10 @@ async function runDoctor(token, opts) {
     // 早先是先 kill 再清缓存、最后才由 launchEdge 校验 manifest，路径错了浏览器就留在关闭状态。
     const edgeExe = findEdgeExe();
     const extDir = resolveExtDir();
-    killAllEdge();
+    const killed = killOwnedEdge(opts);
+    if (killed === "none") {
+      say("没有本工具启动的 Edge 记录，跳过 kill（用户自己开的窗口不动）；要强杀所有 Edge 用 --force-kill");
+    }
     await wait(2000); // 等进程退干净（profile 锁释放）
     clearSwCaches();
     launchEdge(edgeExe, extDir);
@@ -465,4 +491,4 @@ async function runDoctor(token, opts) {
   }
 }
 
-module.exports = { summarizeDiag, probeStatusSnapshot, runStatus, dataDir, maintenanceLockFile, appendMaintenanceLog, acquireMaintenanceLock, releaseMaintenanceLock, findEdgeExe, killAllEdge, clearSwCaches, launchEdge, startProbeServer, runDoctor };
+module.exports = { summarizeDiag, probeStatusSnapshot, runStatus, dataDir, maintenanceLockFile, appendMaintenanceLog, acquireMaintenanceLock, releaseMaintenanceLock, findEdgeExe, killOwnedEdge, clearSwCaches, launchEdge, startProbeServer, runDoctor };

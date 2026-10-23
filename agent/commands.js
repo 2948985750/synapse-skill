@@ -64,7 +64,7 @@ const COMMANDS = [
   {
     name: "doctor",
     lines: [
-      "doctor [--wait <ms>] [--force] [--dry]",
+      "doctor [--wait <ms>] [--force] [--force-kill] [--dry]",
       "（链路医生 + 多会话协调恢复，T-34：快查 → 礼貌等待 SW 重拨（探针端口/活桥，",
       "  默认 --wait 60s）→ 锁协调硬刷（data/maintenance.lock.json，同一时刻只有一个",
       "  会话执行 taskkill+清缓存+重启 Edge，排上的会话等锁释放后复查健康）。",
@@ -103,7 +103,7 @@ const COMMANDS = [
 ];
 
 const FOOTER = [
-  "选项: --wait <ms>  --keep  --max <N>  --clear  --label <text>  --param k=v  --sync  --nowait  --client-id <id>  --trigger-js <expr>  --session <sid>  --shared  --force  --dry",
+  "选项: --wait <ms>  --keep  --max <N>  --clear  --label <text>  --param k=v  --sync  --nowait  --client-id <id>  --trigger-js <expr>  --session <sid>  --shared  --force  --force-kill  --dry",
   "多会话: WB_SESSION=<sid>（本会话 one-shot 优先走 data/bridges/<sid>.json）；--keep 也会注册",
   "        为临时会话桥（注册表条目 + 允许多客户端），供同会话后续 one-shot 毫秒级复用",
 ];
