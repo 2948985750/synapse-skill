@@ -78,6 +78,20 @@ const {
 
 
 
+// 写注册表失败时必须先关掉监听再抛错：早先 writeRegistryEntry 裸调，
+// srv 仍持有事件循环，进程会"报错但活着"，用户看到 JSON 错误却关不掉窗口。
+async function registerOrCleanup(srv, session, port) {
+  try {
+    writeRegistryEntry(session, port);
+  } catch (error) {
+    try {
+      for (const socket of srv.clients) socket.terminate();
+    } catch (_) {}
+    await new Promise((resolve) => srv.close(resolve));
+    throw error;
+  }
+}
+
 // 逐个试连候选桥（连接层故障转移；命令尚未发出，安全）。全失败抛 NO_BRIDGE。
 async function runServe(sid, token, opts = {}) {
   const { srv, port } = await bindAgentWs();
@@ -85,7 +99,7 @@ async function runServe(sid, token, opts = {}) {
   const session = SID_RE.test(sid)
     ? sid
     : "b-" + crypto.randomBytes(3).toString("hex");
-  writeRegistryEntry(session, port);
+  await registerOrCleanup(srv, session, port);
   // --shared：额外写遗留单文件（data/bridge.json 或 WB_BRIDGE_FILE），供未升级脚本发现。
   if (opts.shared) {
     try {
@@ -149,7 +163,7 @@ async function runKeep(command, token, opts) {
   const session = SID_RE.test(rawSid)
     ? rawSid
     : "k-" + crypto.randomBytes(3).toString("hex");
-  writeRegistryEntry(session, port);
+  await registerOrCleanup(srv, session, port);
   srv.on("connection", (socket, request) => {
     let role = null;
     socket.on("close", () => router.disconnect(socket));

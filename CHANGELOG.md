@@ -9,6 +9,14 @@
 
 ## 2026-10-23 — 配对闭环 + 两个 P1
 
+### BUG-11 `serve` / `--keep` 写注册表失败会把进程挂住（P1）
+
+- **现象**：注册表写不进去（如 `WB_BRIDGE_DIR` 指向文件下的路径），stdout 已经输出
+  `{"ok":false,"error":"ENOTDIR…"}`，进程却仍然活着——因为 `srv` 还持有事件循环。
+- **修法**：新增 `registerOrCleanup()`，注册失败先 terminate clients + `srv.close()` 再抛；
+  serve / keep 两处共用。
+- **实测**：指向非法目录时 0.1s 退出并输出 ENOTDIR（此前会挂着）。
+
 ### BUG-10 doctor 的硬刷不是事务（4 个 P1）
 
 - **先杀后校验**：早先 `killAllEdge()` → 清缓存 → 最后才由 `launchEdge` 校验 manifest；
