@@ -92,27 +92,13 @@ test("validateOptions rejects an invalid --filter with INVALID_FILTER", () => {
   );
 });
 
-// bug⑥：配对闭环。readToken 早先恒返回默认密钥，pair 生成的随机令牌根本没人读。
-test("readToken follows the pairing file and falls back to the default key", (t) => {
-  const os = require("os");
-  const path = require("path");
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "synapse-pair-"));
-  const file = path.join(dir, "bridge-auth.json");
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const reload = () => {
-    delete require.cache[require.resolve("./bridge-auth")];
-    return require("./bridge-auth");
-  };
-  process.env.WB_BRIDGE_AUTH_FILE = file;
-  t.after(() => { delete process.env.WB_BRIDGE_AUTH_FILE; delete require.cache[require.resolve("./bridge-auth")]; });
-  const auth = reload();
-  const { DEFAULT_TOKEN } = require("./ws-auth");
-  assert.equal(auth.readToken(), DEFAULT_TOKEN, "没有配对文件时应回落默认密钥");
-  const token = auth.pairToken();
-  assert.notEqual(token, DEFAULT_TOKEN);
-  assert.equal(reload().readToken(), token, "配对后必须使用文件里的令牌");
-  fs.unlinkSync(file);
-  assert.equal(reload().readToken(), DEFAULT_TOKEN, "删掉配对文件后回到默认密钥");
+// 鉴权标识是两侧内置的固定常量：不读文件、不需要用户配对。
+test("readToken returns the built-in shared identifier", () => {
+  const { readToken } = require("./bridge-auth");
+  const { DEFAULT_TOKEN, validToken } = require("./ws-auth");
+  assert.equal(readToken(), DEFAULT_TOKEN);
+  assert.ok(validToken(readToken()), "内置标识必须是合法的 64 位十六进制");
+  assert.notEqual(DEFAULT_TOKEN, "0".repeat(64), "不能再用全零默认值");
 });
 
 // bug⑦：capture 对所有 loadingFinished 无差别 eager 取体（无过滤、无上限）。

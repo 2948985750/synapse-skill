@@ -2,7 +2,7 @@
 // 命令清单的唯一来源。
 //
 // 之前 usage() 手写一份、buildCmd 的 switch 实现一份、SKILL.md 再写一份，三处会各自漂移
-// （实际发生过：文档写 bridge 24 用例、真实 28；pair 有实现但早期文档没列）。
+// （实际发生过：文档写 bridge 24 用例、真实 28；setfile 有实现但早期文档没列）。
 // 现在命令名与用法只在这里定义，usage 由它渲染；后续参数校验也从这里取元数据。
 //
 // 字段：
@@ -11,7 +11,6 @@
 //   writes —— 是否会产生副作用（供未来做只读校验/权限分级用）
 
 const COMMANDS = [
-  { name: "pair", lines: ["pair    (generate/show the local pairing token)"] },
   { name: "list", lines: ["list"] },
   { name: "navigate", lines: ["navigate <tabId> <url>"] },
   { name: "cdp", lines: ["cdp <tabId> <method> ['<params-json>'|@file] [--param k=v ...]   （@file 免 shell 引号）"] },

@@ -1,37 +1,12 @@
 "use strict";
-const fs = require("fs");
-const path = require("path");
-const crypto = require("crypto");
 const auth = require("./ws-auth.js");
-const { DATA_ROOT } = require("./paths.js");
-const { readJson, writeJsonAtomic } = require("./lib/json-store");
-const TOKEN_FILE =
-  process.env.WB_BRIDGE_AUTH_FILE || path.join(DATA_ROOT, "bridge-auth.json");
-const PAIR_HELP =
-  "Bridge is not paired. Run node agent/agent-collect.js pair, then enter that token in the extension settings.";
 
+// 内置标识：扩展与 agent 两侧写死同一枚（ws-auth.js 里的 DEFAULT_TOKEN）。
+// 用途是判断"连进来的服务是不是自家的"——没有配对文件、没有 UI、不需要用户操作。
+// 它不是密码：源码公开，能读代码的本机进程就能拿到；它挡的是"不知道这枚标识的
+// 其它服务/扩展"，同时让双向 HMAC 握手成立。
 function readToken() {
-  // 配对闭环：有 data/bridge-auth.json 就用它，没有则回落到内置默认密钥。
-  // 早先这里无条件返回 DEFAULT_TOKEN，而 pairToken() 仍会生成随机 token 并落盘 ——
-  // 用户照侧边栏提示 `pair` 并把配对码填进扩展后，两端密钥不一致，HMAC 必然失败，
-  // 而且 doctor 重启浏览器也修不好（问题在密钥，不在浏览器）。
-  const saved = readJson(TOKEN_FILE);
-  if (saved && saved.protocol === auth.PROTOCOL && auth.validToken(saved.token))
-    return saved.token;
   return auth.DEFAULT_TOKEN;
-}
-
-function pairToken() {
-  const saved = readJson(TOKEN_FILE);
-  if (saved && saved.protocol === auth.PROTOCOL && auth.validToken(saved.token))
-    return saved.token;
-  const token = crypto.randomBytes(32).toString("hex");
-  writeJsonAtomic(
-    TOKEN_FILE,
-    { protocol: auth.PROTOCOL, token },
-    { mode: 0o600 },
-  );
-  return token;
 }
 function authenticateServer(
   socket,
@@ -193,9 +168,7 @@ function authenticateClient(socket, token, timeoutMs = 5000) {
             ))
           )
             throw new Error(
-              "Bridge proof is invalid（两端密钥不一致：检查扩展里填的配对码，或删除 " +
-                TOKEN_FILE +
-                " 回到内置默认密钥）",
+              "Bridge proof is invalid（两端内置标识不一致：扩展与 agent 的 ws-auth.js DEFAULT_TOKEN 必须相同）",
             );
           if (settled) return;
           settled = true;
@@ -213,8 +186,6 @@ function authenticateClient(socket, token, timeoutMs = 5000) {
 }
 module.exports = {
   readToken,
-  pairToken,
   authenticateServer,
   authenticateClient,
-  TOKEN_FILE,
 };

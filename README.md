@@ -66,6 +66,15 @@ await browser.close();
 CLI 侧也做了同样的收口：`click-el <tab> <i>`、`type-el <tab> <i> <text>`、
 `cdp <tab> <method> @params.json` / `--param k=v`。
 
+## 鉴权与信任模型
+
+扩展与 agent 两侧写死同一枚固定标识（`agent/ws-auth.js` 的 `DEFAULT_TOKEN`，
+扩展仓库里是同值），连接时做双向 HMAC 挑战/应答：不知道这枚标识的服务连不上桥，
+扩展也不会把控制权交给冒充的 agent。**没有配对码、没有 UI、不需要用户操作。**
+
+这枚标识不是密码——源码公开，能在这台机器上运行代码的进程都可以读到它。
+所以本工具按**单用户可信本机**设计，请勿在多用户或存在不可信进程的机器上运行。
+
 ## 测试
 
 ```powershell

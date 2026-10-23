@@ -207,8 +207,6 @@ function buildCmd(rest, opts = {}) {
       // 链路医生 + 多会话协调恢复（T-34）：快查 → 礼貌等待 SW 重拨 → 锁协调硬刷。
       // 多会话统一走它做恢复，不要各自 taskkill Edge（浏览器反复关开重的来源）。
       return { cmd: "doctor" };
-    case "pair":
-      return { cmd: "pair" };
     case "serve": {
       // 常驻 bridge daemon：起 WS server 并保活，注册 data/bridges/<session>.json
       // 供 one-shot 发现（T-33）；[session] 位置参数 = 会话名（多会话各占一条目，互不覆盖），
