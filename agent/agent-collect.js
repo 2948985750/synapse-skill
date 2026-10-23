@@ -14,6 +14,7 @@ const {
   pairToken,
   authenticateServer,
   authenticateClient,
+  TOKEN_FILE: PAIR_FILE,
 } = require("./bridge-auth");
 const {
   BRIDGE_DIR,
@@ -231,8 +232,15 @@ async function main(argv = process.argv.slice(2)) {
   if (!opts.rest.length) usage();
   const command = buildCmd(opts.rest, opts);
   if (command.cmd === "pair") {
+    const token = pairToken();
     process.stdout.write(
-      JSON.stringify({ protocol: "wb-cdp-ws/2", token: pairToken() }) + "\n",
+      JSON.stringify({ protocol: "wb-cdp-ws/2", token }) + "\n",
+    );
+    // 配对是"两端都换"的操作：只生成本地令牌、不填进扩展，会让 HMAC 必然失败。
+    process.stderr.write(
+      "[pair] 已写入 " + PAIR_FILE + "\n" +
+        "[pair] 必须把这个配对码填进扩展设置（侧边栏「保存配对」），否则连接会因密钥不一致而失败；\n" +
+        "[pair] 不配对也能用：两端都会回落到内置默认密钥（仅限本机回环）。\n",
     );
     return;
   }

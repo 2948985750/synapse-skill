@@ -7,6 +7,33 @@
 
 ---
 
+## 2026-10-23 — 配对闭环 + 两个 P1
+
+### BUG-7 配对闭环是死的（P0）：照 UI 提示操作反而连不上
+
+- **现象**：侧边栏让用户「运行 `pair`，把配对码填进来」。照做之后扩展用随机令牌、node 侧仍用默认令牌，
+  HMAC 必然失败；doctor 重启浏览器也修不好（问题在密钥，不在浏览器）。
+- **根因**：`readToken()` 无条件返回 `DEFAULT_TOKEN`，而 `pairToken()` 仍生成随机令牌落盘 —— 一个写、一个不读。
+  扩展侧 `loadBridgeToken()` 同样忽略 storage，配对码只在当次 SW 生命周期内有效。
+- **修法**：`readToken()` 读 `data/bridge-auth.json`（有则用、无则回落默认）；扩展 `loadBridgeToken()` 读
+  `chrome.storage.local.wbBridgeToken`；`pair` 在 stderr 明确提示「必须填进扩展，否则会断」；
+  鉴权失败文案带上「两端密钥不一致」的排查指引。
+- **回归测试**：`readToken follows the pairing file and falls back to the default key`。
+
+### BUG-8 非法 `--filter` 的 INVALID_FILTER 在 CLI 路径不可达（P1）
+
+- **现象**：`capture … --filter '['` 返回 `COMMAND_FAILED` + 裸 `SyntaxError`。
+- **根因**：`validateOptions` 先 `new RegExp` 直接抛，capture 里的 try/catch 永远走不到；
+  上一轮的回归测试只测库函数，属于**测试假绿**。
+- **修法**：`validateOptions` 内包 try/catch，抛 `code=INVALID_FILTER`；回归测试改测该入口。
+
+### BUG-9 全新安装没有 `data/` 时加锁直接 ENOENT（P1）
+
+- **现象**：干净 clone（`data/` 被 gitignore）后 `doctor` 完全跑不起来。
+- **修法**：`acquireMaintenanceLock` 加锁前 `mkdirSync(dir, {recursive:true})`；实测指向不存在的临时目录时 `acquired=true`。
+
+---
+
 ## 2026-10-22
 
 ### 仓库拆分

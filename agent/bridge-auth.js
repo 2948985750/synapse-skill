@@ -11,7 +11,13 @@ const PAIR_HELP =
   "Bridge is not paired. Run node agent/agent-collect.js pair, then enter that token in the extension settings.";
 
 function readToken() {
-  // Token 机制已退役：仅限 127.0.0.1 回环，固定使用内置默认密钥，不再读取文件/环境变量。
+  // 配对闭环：有 data/bridge-auth.json 就用它，没有则回落到内置默认密钥。
+  // 早先这里无条件返回 DEFAULT_TOKEN，而 pairToken() 仍会生成随机 token 并落盘 ——
+  // 用户照侧边栏提示 `pair` 并把配对码填进扩展后，两端密钥不一致，HMAC 必然失败，
+  // 而且 doctor 重启浏览器也修不好（问题在密钥，不在浏览器）。
+  const saved = readJson(TOKEN_FILE);
+  if (saved && saved.protocol === auth.PROTOCOL && auth.validToken(saved.token))
+    return saved.token;
   return auth.DEFAULT_TOKEN;
 }
 
@@ -186,7 +192,11 @@ function authenticateClient(socket, token, timeoutMs = 5000) {
               message.proof,
             ))
           )
-            throw new Error("Bridge proof is invalid");
+            throw new Error(
+              "Bridge proof is invalid（两端密钥不一致：检查扩展里填的配对码，或删除 " +
+                TOKEN_FILE +
+                " 回到内置默认密钥）",
+            );
           if (settled) return;
           settled = true;
           cleanup();
