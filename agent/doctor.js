@@ -191,12 +191,16 @@ function clearSwCaches() {
   }
 }
 
-function launchEdge(exe) {
-  const extDir = resolveExtDir();
+function launchEdge(exe, extDir = resolveExtDir()) {
   const child = spawn(exe, ["--load-extension=" + extDir], {
     detached: true,
     stdio: "ignore",
     windowsHide: true,
+  });
+  // spawn 失败（WB_EDGE_EXE 写错/PATH 里没有）是异步 error 事件，不监听会变成未捕获异常，
+  // 而此时浏览器已经被杀了 —— 至少要让调用方知道"启动失败"而不是静默留个空桌面。
+  child.on("error", (error) => {
+    appendMaintenanceLog({ phase: "edge-launch-failed", error: String(error.message || error) });
   });
   child.unref();
   return extDir;
@@ -205,6 +209,10 @@ function launchEdge(exe) {
 function startProbeServer(token, waitMs) {
   let state = { done: false };
   let portReadyResolve;
+  // 外部取消：runDoctor 一旦提前返回（礼貌等待成功 / 硬刷成功），必须能立刻关掉探针，
+  // 否则进程会被探针自己的 waitMs 定时器（默认 60s/90s）继续挂住 —— 实测 --wait 8s
+  // 时 5s 已输出结果、8s 才退出，默认等待时多挂近一分钟。
+  let cancelDetect = null;
   const portReady = new Promise((r) => {
     portReadyResolve = r;
   });
@@ -217,6 +225,7 @@ function startProbeServer(token, waitMs) {
       portReadyResolve(bound.port);
       const detected = await new Promise((resolve) => {
         const timer = setTimeout(() => resolve(false), waitMs);
+        if (timer && typeof timer.unref === "function") timer.unref();
         const finish = (v) => {
           if (!state.done) {
             state.done = true;
@@ -224,6 +233,7 @@ function startProbeServer(token, waitMs) {
             resolve(v);
           }
         };
+        cancelDetect = () => finish(false);
         srv.on("close", () => finish(false));
         srv.on("connection", (peer, request) => {
           authenticateServer(peer, request, token, (role) => {
@@ -262,7 +272,7 @@ function startProbeServer(token, waitMs) {
       }
     }
   })();
-  return { promise, portReady };
+  return { promise, portReady, cancel: () => { if (cancelDetect) cancelDetect(); } };
 }
 
 async function runDoctor(token, opts) {
@@ -288,6 +298,22 @@ async function runDoctor(token, opts) {
     });
     return;
   }
+  // --dry 只看不动：快查失败就直接打印计划返回，不再走 60s 礼貌等待
+  // （早先 --dry 也要等满 waitMs，且会被探针再挂住一分钟）。
+  if (opts.dry) {
+    say(
+      "dry-run：将执行 taskkill /f /im msedge.exe + 清默认 profile 的 Service Worker/Code Cache + 重启 msedge --load-extension",
+    );
+    emit({
+      ok: false,
+      action: "dry-run",
+      plan: { kill: "msedge.exe", clearCaches: true, relaunch: true },
+      snapshot: snap,
+      ms: Date.now() - t0,
+    });
+    process.exitCode = 1;
+    return;
+  }
   // 2) 礼貌等待：探针端口 + 活桥双通道接 SW 重拨（期间别的会话的恢复也会让它变好）
   if (!opts.force) {
     say(
@@ -306,6 +332,7 @@ async function runDoctor(token, opts) {
       await wait(5000);
       const s = await probeStatusSnapshot(opts);
       if (s.ok) {
+        probe.cancel();
         say("链路已恢复（活桥 " + s.bridge.sid + " 收到扩展），无需硬刷");
         emit({
           ok: true,
@@ -316,6 +343,7 @@ async function runDoctor(token, opts) {
         return;
       }
       if (probeResult && probeResult.detected) {
+        probe.cancel();
         say(
           "扩展 SW 已重拨探针端口（" +
             (probeResult.port || "?") +
@@ -331,19 +359,8 @@ async function runDoctor(token, opts) {
       }
       if (Date.now() - t0 >= opts.waitMs) break;
     }
+    probe.cancel();
     say("礼貌等待超时（" + opts.waitMs + "ms），进入协调硬刷");
-  }
-  if (opts.dry) {
-    console.error(
-      "[doctor] dry-run：将执行 taskkill /f /im msedge.exe + 清默认 profile 的 Service Worker/Code Cache + 启动 msedge --load-extension",
-    );
-    emit({
-      ok: false,
-      action: "dry-run",
-      plan: { kill: "msedge.exe", clearCaches: true, relaunch: true },
-    });
-    process.exitCode = 2;
-    return;
   }
   // 3) 协调硬刷：锁内的会话独占 kill+清缓存+重启；排上的会话等锁释放后复查
   const lock = await acquireMaintenanceLock(opts.waitMs);
@@ -382,19 +399,37 @@ async function runDoctor(token, opts) {
       phase: "hard-refresh-start",
       reason: snap.error || snap.code || "extension offline",
     });
+    // 拿锁之后、动手之前再复查一次：等锁期间别的会话可能已经把链路修好，
+    // 按原实现这里会再杀一次浏览器（注释写的是"别人已修好就直接放行"，与代码相反）。
+    const recheck = await probeStatusSnapshot(opts);
+    if (recheck.ok) {
+      say("等锁期间链路已恢复（holder 已修好），跳过硬刷");
+      emit({ ok: true, action: "waited", via: "lock-recheck", snapshot: recheck });
+      return;
+    }
+    // 所有可能抛错的准备都在破坏性操作之前完成：
+    // 早先是先 kill 再清缓存、最后才由 launchEdge 校验 manifest，路径错了浏览器就留在关闭状态。
+    const edgeExe = findEdgeExe();
+    const extDir = resolveExtDir();
     killAllEdge();
     await wait(2000); // 等进程退干净（profile 锁释放）
     clearSwCaches();
-    const extDir = launchEdge(findEdgeExe());
+    launchEdge(edgeExe, extDir);
     appendMaintenanceLog({ phase: "edge-relaunched", extDir });
+    // 预算从重启成功开始算，不含前面最长 60s 的礼貌等待与最长 60s 的等锁。
+    const hardStart = Date.now();
+    const HARD_BUDGET_MS = 150000;
     say("已杀 Edge + 清 SW/Code Cache + 带扩展重启，等待扩展上线（≤90s）");
-    const hardProbe = startProbeServer(token, 90000);
+    const hardProbe = startProbeServer(
+      token,
+      Math.min(90000, Math.max(5000, HARD_BUDGET_MS - (Date.now() - hardStart))),
+    );
     let probeResult = null;
     hardProbe.promise.then((r) => {
       probeResult = r;
     });
     let ok = false;
-    while (Date.now() - t0 < 150000) {
+    while (Date.now() - hardStart < HARD_BUDGET_MS) {
       await wait(5000);
       if (probeResult && probeResult.detected) {
         ok = true;
@@ -406,6 +441,9 @@ async function runDoctor(token, opts) {
         break;
       }
     }
+    // 无论成功/超时都关掉探针：否则它会按自己的 waitMs 继续占着事件循环，
+    // 让已经拿到结论的 doctor 进程多挂近一分钟。
+    hardProbe.cancel();
     if (ok) {
       appendMaintenanceLog({ phase: "hard-refresh-ok" });
       say("硬刷完成：扩展已上线，链路恢复");
