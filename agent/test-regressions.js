@@ -140,4 +140,12 @@ test("capture only eagerly fetches bodies for candidate requests", async () => {
   assert.deepEqual(fetched, ["rx"], "只应对候选请求取体，无关的 120 条不应触发 getResponseBody");
 });
 
-console.log("ALL-REGRESSIONS-OK (5 cases)");
+// API 入口：索引/条目两种形态。
+test("api.normalizeEl accepts an index or a snapshot entry", () => {
+  const { normalizeEl } = require("./api");
+  assert.deepStrictEqual(normalizeEl(3), { i: 3 });
+  assert.deepStrictEqual(normalizeEl({ i: 2, label: "x" }), { i: 2, label: "x" });
+  assert.throws(() => normalizeEl("3"), /el 需要/);
+});
+
+console.log("ALL-REGRESSIONS-OK (6 cases)");

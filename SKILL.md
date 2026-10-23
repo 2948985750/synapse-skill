@@ -40,6 +40,30 @@ node agent/agent-collect.js doctor [--wait <ms>] [--force] [--dry]
 `--session <sid>` 与 `WB_SESSION` 等价；**Windows 下用 `--session`**。
 全部命令见 `node agent/agent-collect.js`（用法由 `agent/commands.js` 生成，不再手写）。
 
+**交互命令传索引，不传 JSON**：
+
+```powershell
+node agent/agent-collect.js snapshot 17 --session mysession   # → { items:[{i,tag,role,label}] }
+node agent/agent-collect.js click-el 17 3 --session mysession  # 3 就是 items[].i
+node agent/agent-collect.js type-el  17 2 "hello" --session mysession
+```
+
+`cdp` 的 params 同样避开 shell 引号：`cdp <tab> <method> @params.json` 或 `--param k=v`。
+
+## 程序调用（库入口，完全不过 shell）
+
+```js
+const { connect } = require("./agent/api");
+const browser = await connect({ session: "mysession" });
+const snap = await browser.snapshot(tabId);      // { url, count, items:[{i,tag,role,label}] }
+await browser.click(tabId, snap.items[0].i);     // 传索引即可
+await browser.type(tabId, 2, "hello");
+await browser.close();                            // 必须关：否则桥侧保留这条 client
+```
+
+方法：`tabs / open / closeTab / run / snapshot / click / type / cdp / call`。
+`cdp(tabId, method, params)` 的 `params` 是 JS 对象，没有序列化损耗。
+
 ## 模块
 
 | 模块 | 内容 |

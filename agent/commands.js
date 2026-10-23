@@ -14,7 +14,7 @@ const COMMANDS = [
   { name: "pair", lines: ["pair    (generate/show the local pairing token)"] },
   { name: "list", lines: ["list"] },
   { name: "navigate", lines: ["navigate <tabId> <url>"] },
-  { name: "cdp", lines: ["cdp <tabId> <method> '<params-json>'"] },
+  { name: "cdp", lines: ["cdp <tabId> <method> ['<params-json>'|@file] [--param k=v ...]   （@file 免 shell 引号）"] },
   {
     name: "run",
     lines: [
@@ -104,7 +104,7 @@ const COMMANDS = [
 ];
 
 const FOOTER = [
-  "选项: --wait <ms>  --keep  --max <N>  --clear  --label <text>  --sync  --nowait  --client-id <id>  --trigger-js <expr>  --session <sid>  --shared  --force  --dry",
+  "选项: --wait <ms>  --keep  --max <N>  --clear  --label <text>  --param k=v  --sync  --nowait  --client-id <id>  --trigger-js <expr>  --session <sid>  --shared  --force  --dry",
   "多会话: WB_SESSION=<sid>（本会话 one-shot 优先走 data/bridges/<sid>.json）；--keep 也会注册",
   "        为临时会话桥（注册表条目 + 允许多客户端），供同会话后续 one-shot 毫秒级复用",
 ];

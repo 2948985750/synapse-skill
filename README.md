@@ -51,6 +51,21 @@ node agent/agent-collect.js list   --session mysession
 
 `data/` 是运行时工作区，不入库，首次运行自动创建。
 
+## 程序调用（库入口）
+
+命令行要经过 shell，JSON/JS 里的引号容易被吞（PowerShell 5.1 尤其）。程序直接用库入口：
+
+```js
+const { connect } = require("./agent/api");
+const browser = await connect({ session: "mywork" });
+const snap = await browser.snapshot(tabId);
+await browser.click(tabId, snap.items[0].i);   // 索引，不是 JSON
+await browser.close();
+```
+
+CLI 侧也做了同样的收口：`click-el <tab> <i>`、`type-el <tab> <i> <text>`、
+`cdp <tab> <method> @params.json` / `--param k=v`。
+
 ## 测试
 
 ```powershell

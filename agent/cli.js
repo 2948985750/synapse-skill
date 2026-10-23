@@ -1,6 +1,22 @@
 "use strict";
-// cli：参数解析与命令构造（纯函数，不碰网络/文件，便于单测）。
+// cli：参数解析与命令构造（不碰网络；params 支持 @file，其余仍是纯函数，便于单测）。
+const fs = require("fs");
 const { renderUsage } = require("./commands");
+
+function codedError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+// --param k=v 的值：能当数字/布尔/null 就按字面量，否则当字符串。
+function coerceParam(raw) {
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  if (raw === "null") return null;
+  if (raw !== "" && !Number.isNaN(Number(raw))) return Number(raw);
+  return raw;
+}
 
 function usage() {
   console.log(renderUsage());
@@ -24,6 +40,7 @@ function parseArgs(argv) {
   let snapMax = 50;
   let clear = false;
   let label = "";
+  const params = {};
   let triggerJs = "";
   let clientId = process.env.WB_CLIENT_ID || "";
   // --sync：run 不带 awaitPromise（fire-and-forget，副作用用 window 寄存后二次 run 查询）。
@@ -49,6 +66,11 @@ function parseArgs(argv) {
     else if (a === "--max") snapMax = Number(argv[++i]) || snapMax;
     else if (a === "--clear") clear = true;
     else if (a === "--label") label = argv[++i] || "";
+    else if (a === "--param") {
+      const kv = String(argv[++i] == null ? "" : argv[i]);
+      const at = kv.indexOf("=");
+      if (at > 0) params[kv.slice(0, at)] = coerceParam(kv.slice(at + 1));
+    }
     else if (a === "--trigger-js") triggerJs = argv[++i] || "";
     else if (a === "--client-id") clientId = argv[++i] || "";
     else if (a === "--sync") sync = true;
@@ -70,6 +92,7 @@ function parseArgs(argv) {
     snapMax,
     clear,
     label,
+    params,
     triggerJs,
     clientId,
     sync,
@@ -119,16 +142,29 @@ function buildCmd(rest, opts = {}) {
       };
     }
     case "cdp": {
-      const [tabId, method, paramsJson] = args;
+      const [tabId, method, paramsArg] = args;
       if (!tabId || !method) usage();
-      return {
-        cmd: "cdp",
-        args: {
-          tabId: Number(tabId),
-          method,
-          params: paramsJson ? JSON.parse(paramsJson) : {},
-        },
-      };
+      // params 三种给法：省略 / 内联 JSON / @file；再加 --param k=v 覆盖。
+      // 内联 JSON 在 PowerShell 5.1 里会被吃掉内嵌双引号，@file 是给 shell 用的安全入口。
+      let params = {};
+      if (paramsArg !== undefined) {
+        let raw = paramsArg;
+        if (raw.startsWith("@")) {
+          const file = raw.slice(1);
+          try {
+            raw = fs.readFileSync(file, "utf8");
+          } catch (error) {
+            throw codedError("INVALID_PARAMS", "读不到参数文件 " + file + "：" + error.message);
+          }
+        }
+        try {
+          params = raw.trim() ? JSON.parse(raw) : {};
+        } catch (error) {
+          throw codedError("INVALID_PARAMS", "params 不是合法 JSON：" + error.message);
+        }
+      }
+      Object.assign(params, opts.params || {});
+      return { cmd: "cdp", args: { tabId: Number(tabId), method, params } };
     }
     case "run": {
       const [tabId, expr] = args;

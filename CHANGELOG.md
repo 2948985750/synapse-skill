@@ -7,6 +7,24 @@
 
 ---
 
+## 2026-10-23（下午）— 库入口 + cdp 参数不再走 shell
+
+### 新增 `agent/api.js`：程序调用入口
+
+- `connect({session})` 返回一个客户端：`tabs / open / closeTab / run / snapshot / click / type / cdp / call`。
+- 参数就是 JS 值，不需要 JSON 字符串，彻底绕开 PowerShell 的引号问题。
+- 内部复用 transport/registry/bridge-auth；自动补 `clientId`（桥要求每条命令带）。
+- 实测：`tabs → open → snapshot → click(索引) → 跳转校验 → closeTab` 全链路通过。
+
+### `cdp` 的 params 支持 `@file` 与 `--param k=v`
+
+- `cdp <tab> <method> @params.json`：从文件读 JSON。
+- `cdp <tab> <method> --param expression=document.title --param returnByValue=true`。
+- 两者可叠加，`--param` 覆盖文件值；非法 JSON / 文件缺失统一报 `INVALID_PARAMS`。
+- 旧的 `'<params-json>'` 写法仍然兼容。
+
+---
+
 ## 2026-10-23 — 配对闭环 + 两个 P1
 
 ### BUG-13 交互命令要求 JSON 走 argv，在 PowerShell 里用不了（P1 易用性）
