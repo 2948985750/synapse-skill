@@ -91,10 +91,21 @@ node runner/profile-runner.js --profile profiles/upwork.com.json --task search \
 ## 测试
 
 ```powershell
-npm test           # bridge 28 + 命令表漂移守卫 + review 回归 2 例
-npm run test:agent # 仅桥
+npm test             # 单测：bridge 28 + 命令表守卫 + 回归 10 + runner 14（零浏览器）
+npm run test:profiles # 画像契约：真浏览器跑 upwork/fiverr 的 20 个用例（含采集范围）
+npm run test:all      # 上面两套串起来
+npm run test:agent    # 仅桥
 npm run verify
 ```
+
+`test:profiles` 需要：已登录的浏览器、扩展已加载，以及一条活桥
+（`node agent/agent-collect.js serve profile-test`）。它覆盖：
+
+- P0 正常路径：upwork search/job/feed/saved、fiverr search/freelancer；
+- P1 边界：缺参数、未知 task、`--limit` 超上限、分页与越界页、无结果查询、中文参数、写操作守卫；
+- 数据质量：必填字段非空、URL 规范、cipher/评分格式、按 URL 去重；
+- 采集范围：不给参数时的默认 page/limit、`scope` 输出、不翻页不展开；
+- P2 稳定性：重复运行、并发两个 recipe、capture 会话不泄漏。
 
 ## 相关仓库
 

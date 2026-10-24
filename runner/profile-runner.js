@@ -123,6 +123,34 @@ function validateItems(items, execution, { limit } = {}) {
   return { ok, state, got, missing: missing.length, reason, items: selected };
 }
 
+// Resolve the collection scope: recipe defaults, explicit --param/--limit
+// overrides, the hard cap, and the write guard. Pure: nothing is opened here.
+function resolveScope(recipe, argv) {
+  const params = { ...(recipe.defaults || {}), ...parseParams(argv) };
+  const limitText = getOpt(argv, "--limit");
+  const effectiveLimit = limitText === undefined
+    ? (recipe.defaults && recipe.defaults.limit !== undefined ? Number(recipe.defaults.limit) : undefined)
+    : Number(limitText);
+  if (effectiveLimit !== undefined && (!Number.isFinite(effectiveLimit) || effectiveLimit <= 0)) {
+    throw new Error("--limit 必须是正整数");
+  }
+  const maxLimit = Number(recipe.maxLimit || 50);
+  if (effectiveLimit !== undefined && effectiveLimit > maxLimit) {
+    throw new Error("--limit 超过画像上限 maxLimit=" + maxLimit + "（想要更多请改画像）");
+  }
+  if (recipe.writes === true && !argv.includes("--allow-write")) {
+    throw new Error("recipe 是写操作，需显式 --allow-write");
+  }
+  const scope = {
+    page: params.page === undefined ? null : Number(params.page),
+    limit: effectiveLimit === undefined ? null : effectiveLimit,
+    maxLimit,
+    showMore: false,
+    pages: 1,
+  };
+  return { limit: effectiveLimit, params, scope };
+}
+
 // ---------------- CLI ----------------
 async function main(argv = process.argv.slice(2), deps = {}) {
   const profilePath = getOpt(argv, "--profile");
@@ -135,12 +163,7 @@ async function main(argv = process.argv.slice(2), deps = {}) {
     JSON.parse(fs.readFileSync(path.resolve(ROOT, profilePath), "utf8")),
   );
   const recipe = getRecipe(profile, task);
-  const params = parseParams(argv);
-  const limitText = getOpt(argv, "--limit");
-  const limit = limitText === undefined ? undefined : Number(limitText);
-  if (limit !== undefined && (!Number.isFinite(limit) || limit <= 0)) {
-    throw new Error("--limit 必须是正整数");
-  }
+  const { limit, params, scope } = resolveScope(recipe, argv);
   const session = getOpt(argv, "--session", "");
   const keepTab = argv.includes("--keep-tab");
   const outPath = getOpt(argv, "--out", path.join("out", profile.domain, task + ".json"));
@@ -169,6 +192,28 @@ async function main(argv = process.argv.slice(2), deps = {}) {
       await new Promise((r) => setTimeout(r, 800));
     }
     const result = validateItems(items, recipe.execution, { limit });
+    // Some sites answer a no-match query with unrelated recommendations.
+    // When the recipe names its query param, require at least half of the items
+    // to mention one of its tokens; otherwise the data is off-query garbage.
+    const matchParam = recipe.execution.matchQuery;
+    if (result.ok && matchParam) {
+      const tokens = String(params[matchParam] || "")
+        .toLowerCase()
+        .split(/\s+/)
+        .filter((t) => t.length >= 2);
+      if (tokens.length) {
+        const hits = result.items.filter((it) => {
+          const hay = [it.title, it.name, it.desc, it.description, it.headline,
+            Array.isArray(it.skills) ? it.skills.join(" ") : ""].filter(Boolean).join(" ").toLowerCase();
+          return tokens.some((t) => hay.includes(t));
+        }).length;
+        if (hits * 2 < result.items.length) {
+          result.ok = false;
+          result.state = "off-query";
+          result.reason = "结果与查询无关（命中 " + hits + "/" + result.items.length + "），站点可能回退到推荐岗位";
+        }
+      }
+    }
     const outFile = path.resolve(ROOT, outPath);
     fs.mkdirSync(path.dirname(outFile), { recursive: true });
     fs.writeFileSync(outFile, JSON.stringify(result.items, null, 2) + "\n", "utf8");
@@ -179,7 +224,7 @@ async function main(argv = process.argv.slice(2), deps = {}) {
       domain: profile.domain,
       url,
       got: result.got,
-      limit: limit === undefined ? null : limit,
+      scope,
       missing: result.missing,
       reason: result.reason,
       out: outFile,
@@ -204,4 +249,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { renderTemplate, validateProfile, getRecipe, validateItems, parseParams, main };
+module.exports = { renderTemplate, validateProfile, getRecipe, validateItems, parseParams, resolveScope, main };

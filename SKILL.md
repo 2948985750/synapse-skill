@@ -96,6 +96,9 @@ node runner/profile-runner.js --profile profiles/upwork.com.json --task job \
 # Fiverr（Pro 会话）：搜索 16 个 freelancer/agency
 node runner/profile-runner.js --profile profiles/fiverr.com.json --task search \
   --param q="ai automation" --limit 16
+
+# 契约测试（真浏览器，需要已登录 + 活桥）
+npm run test:profiles
 ```
 
 - 画像规范：`schemaVersion: 2`，`recipes[]` 里每个 `purpose` 对应一个任务，`execution.kind` 目前支持 `dom-extract`
@@ -104,6 +107,10 @@ node runner/profile-runner.js --profile profiles/fiverr.com.json --task search \
 - SPA 首次渲染慢时会自动重试抓取（`--retry-ms`，默认 6s）。
 - 产物默认写 `out/<domain>/<task>.json`（`.gitignore` 已忽略）；`--out` 可改。
 - 需要登录态的站点复用浏览器真实会话，不伪造请求头。
+
+**默认采集范围**（用户没说明时）：只抓第 1 页、条数取 recipe 的 `defaults.limit`、不翻页、不点"加载更多"；
+`--limit` 超过 `maxLimit` 直接拒绝；写操作（如 Upwork 的 save/unsave flow）默认不执行。
+摘要里的 `scope:{page,limit,maxLimit,showMore,pages}` 就是本次实际范围。
 
 ## 发现顺序与故障转移
 

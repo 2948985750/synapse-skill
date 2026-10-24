@@ -2,7 +2,7 @@
 // Pure-function tests for the profile runner (no browser).
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { renderTemplate, validateProfile, getRecipe, validateItems, parseParams } = require("../runner/profile-runner.js");
+const { renderTemplate, validateProfile, getRecipe, validateItems, parseParams, resolveScope } = require("../runner/profile-runner.js");
 
 const baseProfile = {
   schemaVersion: 2,
@@ -77,4 +77,28 @@ test("validateItems: missing required fields is invalid with a reason", () => {
   assert.equal(r.ok, false);
   assert.equal(r.state, "invalid");
   assert.match(r.reason, /缺字段/);
+});
+
+test("resolveScope applies recipe defaults (bounded, one page)", () => {
+  const recipe = { defaults: { page: "1", limit: 10 }, maxLimit: 10, execution: {} };
+  const { limit, params, scope } = resolveScope(recipe, []);
+  assert.equal(limit, 10);
+  assert.equal(params.page, "1");
+  assert.deepEqual(scope, { page: 1, limit: 10, maxLimit: 10, showMore: false, pages: 1 });
+});
+
+test("resolveScope lets an explicit limit win within the cap", () => {
+  const recipe = { defaults: { limit: 10 }, maxLimit: 10, execution: {} };
+  assert.equal(resolveScope(recipe, ["--limit", "3"]).limit, 3);
+});
+
+test("resolveScope refuses a limit above maxLimit before any browser work", () => {
+  const recipe = { defaults: { limit: 10 }, maxLimit: 10, execution: {} };
+  assert.throws(() => resolveScope(recipe, ["--limit", "99"]), /maxLimit=10/);
+});
+
+test("resolveScope refuses a write recipe without --allow-write", () => {
+  const recipe = { writes: true, maxLimit: 1, execution: {} };
+  assert.throws(() => resolveScope(recipe, []), /--allow-write/);
+  assert.equal(resolveScope(recipe, ["--allow-write"]).limit, undefined);
 });
