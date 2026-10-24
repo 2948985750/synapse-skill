@@ -75,6 +75,19 @@ CLI 侧也做了同样的收口：`click-el <tab> <i>`、`type-el <tab> <i> <tex
 这枚标识不是密码——源码公开，能在这台机器上运行代码的进程都可以读到它。
 所以本工具按**单用户可信本机**设计，请勿在多用户或存在不可信进程的机器上运行。
 
+
+## 站点画像与 runner
+
+`profiles/` 存站点画像（v2 schema），`runner/profile-runner.js` 负责执行：
+
+```powershell
+node runner/profile-runner.js --profile profiles/upwork.com.json --task search \
+  --param q="AI automation" --limit 10
+```
+
+画像只描述站点（URL 模板、`extractJs`、字段、参数），执行能力全部来自 `agent/`；
+产物写 `out/<domain>/<task>.json`（已 gitignore）。
+
 ## 测试
 
 ```powershell

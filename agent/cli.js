@@ -72,7 +72,17 @@ function parseArgs(argv) {
       const at = kv.indexOf("=");
       if (at > 0) params[kv.slice(0, at)] = coerceParam(kv.slice(at + 1));
     }
-    else if (a === "--trigger-js") triggerJs = argv[++i] || "";
+    else if (a === "--trigger-js") {
+      // 同上：--trigger-js @file 读文件，避免长 JS 过 argv 被 Windows 重写。
+      triggerJs = argv[++i] || "";
+      if (triggerJs.startsWith("@")) {
+        try {
+          triggerJs = fs.readFileSync(triggerJs.slice(1), "utf8");
+        } catch (error) {
+          throw codedError("INVALID_EXPRESSION", "读不到 --trigger-js 文件：" + error.message);
+        }
+      }
+    }
     else if (a === "--client-id") clientId = argv[++i] || "";
     else if (a === "--sync") sync = true;
     else if (a === "--nowait") nowait = true;
@@ -170,8 +180,19 @@ function buildCmd(rest, opts = {}) {
       return { cmd: "cdp", args: { tabId: Number(tabId), method, params } };
     }
     case "run": {
-      const [tabId, expr] = args;
-      if (!tabId || !expr) usage();
+      const [tabId, exprArg] = args;
+      if (!tabId || !exprArg) usage();
+      // @file：Windows argv 不能无损承载长 JS（实测 952 字符的 extractJs 到子进程只剩
+      // 950 字符，正则被改坏后静默返回 []）。脚本一律走文件，argv 只传路径。
+      let expr = exprArg;
+      if (expr.startsWith("@")) {
+        const file = expr.slice(1);
+        try {
+          expr = fs.readFileSync(file, "utf8");
+        } catch (error) {
+          throw codedError("INVALID_EXPRESSION", "读不到表达式文件 " + file + "：" + error.message);
+        }
+      }
       return {
         cmd: "cdp",
         args: {

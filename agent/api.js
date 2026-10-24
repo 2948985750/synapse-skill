@@ -51,8 +51,14 @@ async function connect(opts = {}) {
     close: () => channel.close(),
 
     tabs: () => call("tabs"),
+    // waitMs is forwarded: without it the extension returns as soon as the
+    // document loads, which is too early for SPAs (the profile runner then sees
+    // an empty list). `nowait: true` keeps the old fire-and-forget behaviour.
     open: (url, o = {}) =>
-      call("open", { url, waitMs: o.nowait ? 0 : undefined }),
+      call("open", {
+        url,
+        waitMs: o.nowait ? 0 : o.waitMs,
+      }),
     closeTab: (tabId) => call("close", { tabId }),
 
     // 页内 JS：默认 awaitPromise + returnByValue，与 CLI 的 run 一致。

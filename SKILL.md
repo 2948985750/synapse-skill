@@ -79,6 +79,32 @@ await browser.close();                            // 必须关：否则桥侧保
 | `lib/json-store.js` | JSON 读写 + 原子写（tmp + rename） |
 | `lib/ui.js` | stdout JSON 出口与错误归一化 |
 
+## 站点画像与 runner
+
+执行层（打开页面、跑 `extractJs`、校验字段/条数）在本仓库；站点知识以 JSON 画像的形式放在 `profiles/`，
+由 `runner/profile-runner.js` 驱动，全程走 `agent/api.js`（没有 shell、没有 argv 传参问题）。
+
+```powershell
+# Upwork：搜索 10 条（q/page 两个参数由画像的 URL 模板声明）
+node runner/profile-runner.js --profile profiles/upwork.com.json --task search \
+  --param q="AI automation" --param page=1 --limit 10
+
+# Upwork：按 cipher 打开岗位详情
+node runner/profile-runner.js --profile profiles/upwork.com.json --task job \
+  --param cipher=022113906523751499861
+
+# Fiverr（Pro 会话）：搜索 16 个 freelancer/agency
+node runner/profile-runner.js --profile profiles/fiverr.com.json --task search \
+  --param q="ai automation" --limit 16
+```
+
+- 画像规范：`schemaVersion: 2`，`recipes[]` 里每个 `purpose` 对应一个任务，`execution.kind` 目前支持 `dom-extract`
+  （`openUrlTemplate` + `extractJs` + `requiredFields` + `minItems` + `settleMs`）。
+- `--limit` 只是**上限**，不是下限；`minItems` 才是门槛。0 条一律 `blank`（不算成功）。
+- SPA 首次渲染慢时会自动重试抓取（`--retry-ms`，默认 6s）。
+- 产物默认写 `out/<domain>/<task>.json`（`.gitignore` 已忽略）；`--out` 可改。
+- 需要登录态的站点复用浏览器真实会话，不伪造请求头。
+
 ## 发现顺序与故障转移
 
 `WB_BRIDGE_FILE`（遗留独占）→ 会话桥（`--session` / `WB_SESSION`）→ 其它活桥
