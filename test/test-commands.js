@@ -8,9 +8,9 @@ const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
 
-const { COMMANDS, NAMES, renderUsage } = require("./commands");
+const { COMMANDS, NAMES, renderUsage } = require("../agent/commands");
 
-const cliSrc = fs.readFileSync(path.join(__dirname, "cli.js"), "utf8");
+const cliSrc = fs.readFileSync(path.join(__dirname, "..", "agent", "cli.js"), "utf8");
 const implemented = [...cliSrc.matchAll(/case "([a-z0-9-]+)":/g)].map((m) => m[1]);
 
 const missingInTable = implemented.filter((n) => !NAMES.includes(n));
@@ -44,7 +44,7 @@ assert.ok(text.includes("--session <sid>"), "usage 必须列出 --session");
 
 // 交互参数形态：索引直传（避免 PowerShell 吃掉 JSON 引号），旧 JSON 写法仍兼容。
 {
-  const { buildCmd } = require("./cli");
+  const { buildCmd } = require("../agent/cli");
   assert.deepStrictEqual(buildCmd(["click-el", "17", "3"], {}).args.el, { i: 3 });
   assert.deepStrictEqual(
     buildCmd(["click-el", "17", "3"], { label: "搜索" }).args.el,

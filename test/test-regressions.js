@@ -5,8 +5,8 @@ const assert = require("node:assert");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { createBridgeRouter } = require("./bridge-router");
-const { buildCaptureSessionResult } = require("./capture");
+const { createBridgeRouter } = require("../agent/bridge-router");
+const { buildCaptureSessionResult } = require("../agent/capture");
 
 function fakeSocket(name) {
   const sent = [];
@@ -87,7 +87,7 @@ test("invalid --filter yields INVALID_FILTER instead of a bare SyntaxError", asy
 
 // bug⑤：CLI 路径上的非法 --filter 早先抛裸 SyntaxError，被归一成 COMMAND_FAILED。
 test("validateOptions rejects an invalid --filter with INVALID_FILTER", () => {
-  const { validateOptions } = require("./cli");
+  const { validateOptions } = require("../agent/cli");
   assert.throws(
     () => validateOptions({ waitMs: 1000, durationMs: 1000, bodyMaxKb: 1, snapMax: 1, filter: "[" }),
     (error) => error.code === "INVALID_FILTER",
@@ -96,8 +96,8 @@ test("validateOptions rejects an invalid --filter with INVALID_FILTER", () => {
 
 // 鉴权标识是两侧内置的固定常量：不读文件、不需要用户配对。
 test("readToken returns the built-in shared identifier", () => {
-  const { readToken } = require("./bridge-auth");
-  const { DEFAULT_TOKEN, validToken } = require("./ws-auth");
+  const { readToken } = require("../agent/bridge-auth");
+  const { DEFAULT_TOKEN, validToken } = require("../agent/ws-auth");
   assert.equal(readToken(), DEFAULT_TOKEN);
   assert.ok(validToken(readToken()), "内置标识必须是合法的 64 位十六进制");
   assert.notEqual(DEFAULT_TOKEN, "0".repeat(64), "不能再用全零默认值");
@@ -105,7 +105,7 @@ test("readToken returns the built-in shared identifier", () => {
 
 // bug⑦：capture 对所有 loadingFinished 无差别 eager 取体（无过滤、无上限）。
 test("capture only eagerly fetches bodies for candidate requests", async () => {
-  const { doCaptureMany } = require("./capture");
+  const { doCaptureMany } = require("../agent/capture");
   const events = new Map();
   const list = [];
   for (let i = 0; i < 120; i++) list.push({ method: "Network.loadingFinished", params: { requestId: "r" + i } });
@@ -130,7 +130,7 @@ test("capture only eagerly fetches bodies for candidate requests", async () => {
 
 // API 入口：索引/条目两种形态。
 test("api.normalizeEl accepts an index or a snapshot entry", () => {
-  const { normalizeEl } = require("./api");
+  const { normalizeEl } = require("../agent/api");
   assert.deepStrictEqual(normalizeEl(3), { i: 3 });
   assert.deepStrictEqual(normalizeEl({ i: 2, label: "x" }), { i: 2, label: "x" });
   assert.throws(() => normalizeEl("3"), /el 需要/);
@@ -169,7 +169,7 @@ test("router caps in-flight commands per connection", () => {
 // doctor 默认只杀"本工具启动的" Edge：没有 pid 记录时不应该动用户的浏览器。
 test("killOwnedEdge does nothing when we never launched a browser", (t) => {
   if (process.platform !== "win32") return t.skip("仅 Windows");
-  const { killOwnedEdge } = require("./doctor");
+  const { killOwnedEdge } = require("../agent/doctor");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "synapse-edge-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   assert.equal(killOwnedEdge({}, dir), "none", "没有自己的 pid 记录时必须跳过 kill");
@@ -185,11 +185,11 @@ test("data root resolution prefers config over the platform default", (t) => {
   t.after(() => {
     if (prevCfg === undefined) delete process.env.WB_CONFIG_FILE; else process.env.WB_CONFIG_FILE = prevCfg;
     if (prevData === undefined) delete process.env.WB_DATA_DIR; else process.env.WB_DATA_DIR = prevData;
-    delete require.cache[require.resolve("./paths")];
+    delete require.cache[require.resolve("../agent/paths")];
     fs.rmSync(dir, { recursive: true, force: true });
   });
-  delete require.cache[require.resolve("./paths")];
-  const paths = require("./paths");
+  delete require.cache[require.resolve("../agent/paths")];
+  const paths = require("../agent/paths");
 
   assert.equal(paths.resolveDataRoot({}).source, "default");
   const chosen = path.join(dir, "mydata");

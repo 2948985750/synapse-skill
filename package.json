@@ -8,9 +8,9 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node agent/test-bridge.js && node agent/test-commands.js && node agent/test-regressions.js && node --test runner/test-runner.js",
-    "test:agent": "node agent/test-bridge.js",
-    "test:commands": "node agent/test-commands.js",
+    "test": "node test/test-bridge.js && node test/test-commands.js && node test/test-regressions.js && node --test test/test-runner.js",
+    "test:agent": "node test/test-bridge.js",
+    "test:commands": "node test/test-commands.js",
     "verify": "node --check agent/agent-collect.js && npm test",
     "profiles:run": "node runner/profile-runner.js"
   }

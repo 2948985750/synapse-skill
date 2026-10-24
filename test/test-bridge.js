@@ -7,21 +7,21 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
-const { createBridgeRouter } = require("./bridge-router");
-const { authenticateServer, authenticateClient } = require("./bridge-auth");
-const { WebSocketServer, WebSocket } = require("./vendor/ws");
-const auth = require("./ws-auth");
-const { parseArgs, buildCmd } = require("./cli");
-const { bridgeCandidates, listLiveBridges } = require("./registry");
-const { connectBridgeChain, executeCommand } = require("./transport");
-const { buildCaptureSessionResult, doCaptureMany } = require("./capture");
+const { createBridgeRouter } = require("../agent/bridge-router");
+const { authenticateServer, authenticateClient } = require("../agent/bridge-auth");
+const { WebSocketServer, WebSocket } = require("../agent/vendor/ws");
+const auth = require("../agent/ws-auth");
+const { parseArgs, buildCmd } = require("../agent/cli");
+const { bridgeCandidates, listLiveBridges } = require("../agent/registry");
+const { connectBridgeChain, executeCommand } = require("../agent/transport");
+const { buildCaptureSessionResult, doCaptureMany } = require("../agent/capture");
 const {
   acquireMaintenanceLock,
   releaseMaintenanceLock,
   maintenanceLockFile,
   startProbeServer,
-} = require("./doctor");
-const { resolveExtDir } = require("./paths");
+} = require("../agent/doctor");
+const { resolveExtDir } = require("../agent/paths");
 class Socket extends EventEmitter {
   constructor() {
     super();
@@ -387,7 +387,7 @@ function runCli(args, env) {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
-      [path.join(__dirname, "agent-collect.js"), ...args],
+      [path.join(__dirname, "..", "agent", "agent-collect.js"), ...args],
       { env: { ...process.env, ...env }, windowsHide: true },
     );
     let stdout = "",

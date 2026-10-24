@@ -2,7 +2,7 @@
 // Pure-function tests for the profile runner (no browser).
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { renderTemplate, validateProfile, getRecipe, validateItems, parseParams } = require("./profile-runner.js");
+const { renderTemplate, validateProfile, getRecipe, validateItems, parseParams } = require("../runner/profile-runner.js");
 
 const baseProfile = {
   schemaVersion: 2,

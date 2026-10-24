@@ -22,7 +22,7 @@
 | ❌ 不在 | MV3 扩展（manifest、service worker、`chrome.debugger`、页内注入、侧边栏）→ 见 [synapse](https://github.com/2948985750/synapse) |
 
 两侧唯一的"重复"是 `ws-auth.js`：浏览器不能 `require` node 模块，所以协议
-`wb-cdp-ws/2`（HMAC 挑战/证明）两边各实现一份，由扩展仓库的 `test-ws-auth.js` 做互通验证。
+`wb-cdp-ws/2`（HMAC 挑战/证明）两边各实现一份，由扩展仓库的 `extension/test/test-ws-auth.js` 做互通验证。
 
 ## 安装
 
