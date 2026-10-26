@@ -7,6 +7,333 @@
 
 ---
 
+### 变更：画像快照瘦身——只留可交互元素，站点框架归并 chrome（顺带修 snapshot 形状 bug）
+
+- **现象**：快照并入画像后两份 draft 达 1.08/1.16MB。无用数据来自四处：
+  outline 收了全部持文本元素（upwork 2,892 条里 interactive 仅 748）；跨页重复的
+  导航/侧栏/页脚（zhipin 80% 重复、180 个元素每页出现）；`links`/`controls` 是采集
+  中间量；capture 混入第三方埋点/广告（upwork 187 条里 56 条无关）。
+- **顺带发现的 bug**：`browser.snapshot()` 返回 `{url,ts,total,count,items}` 而非裸
+  数组，`Array.isArray(snap)` 恒假 → `controls`/`dangerous` 永远为空，**危险控件审计
+  静默失效**（报告里始终显示 0）。修法：取 `snap.items`，且只保留 dangerous。
+- **修法**：新增纯函数 `buildSnapshot`（可单测）：
+  - outline 只留 `interactive:true`；纯文本与"仅 cursorPointer"（多为可点容器后代，
+    cursor 继承陷阱）不再入画像；
+  - 同一 `sig+text` 在**半数以上页面**（最少 3 页）重复出现 = 站点框架，归并进
+    `snapshot.chrome` 只存一份。初版阈值定为固定 3 页，实测审计发现会把页面级操作
+    （详情页的 Apply now ×7、同族页共享 tab ×8）误当归并，导致 upwork feed 页筛成空，
+    已改为按页数自适应（半数）；
+  - `links`/`controls` 不入画像（BFS 用 enqueued/skipped 已够）；
+  - capture 只留同源或 JSON 响应（第三方埋点/广告丢弃）；
+  - structure.lists 剔除 SVG/渐变图元（g/path/linearGradient/stop…）并截断 8 条；
+  - 每页 outline 上限 200（与页内探针的整形上限一致；初版 120 会让 zhipin 7 个
+    搜索页触顶截断）。
+  discover.js 的 page 对象同步移除 links/controls 字段。
+- **实测审计**（真浏览器重跑原始探针，与全站并集比对）：upwork 真正丢失 0；
+  zhipin 缺失项均为"审计时下拉展开/职位列表更新"的页面状态差异，非过滤规则所致；
+  修正阈值与上限后触顶为 0。
+- **实操验证**（照画像真跑采集）：发现 zhipin 职位卡在 clickables 里只有文本、没有
+  跳转地址（采集时靠现场 DOM 补 href）。已给 clickables 探针补抓容器内第一个
+  `a[href]`（chrome 归并同样保留 href），重跑后搜索页 17/17 张卡带 href；仅凭画像
+  `snapshot.clickables` 即可列出职位并打开详情（已验证第一条链接打开后职位名一致）。
+- **效果**：upwork 1.08MB → **0.40MB（−63%）**，zhipin 1.16MB → **0.57MB（−51%）**；
+  危险控件审计恢复（upwork 回填 10 条命中）。知识字段不受影响。
+
+### 变更：画像根改回"相对安装位置"——`<SKILL_ROOT>/profiles`
+
+- **现象**：画像被写到 `~/.zcode/synapse-profiles`（config profileRoot 显式指定），
+  而用户要的是**以 skill 安装位置为相对上级路径**——skill 装到哪，画像就落在哪的
+  `profiles/` 下。
+- **修法**：`agent/paths.js` 的 `resolveProfilesRoot` 默认值改为
+  `path.join(SKILL_ROOT, "profiles")`；删掉 config.json 里的 `profileRoot` 覆盖
+  （dataRoot 不动，桥/日志/即席产物仍在数据根）。存量两站 draft 已迁入
+  `<SKILL_ROOT>/profiles/draft/`（本机安装位是 junction，即源码仓 `profiles/draft/`）。
+  `ensureProfilesSeeded` 退化为无害（种子目录与画像根同址）；README 路径表与
+  SKILL.md 使用注意同步改口。operator 仍可用 `WB_PROFILES_DIR` / `config set
+  profile-root` 整体重定位，但默认跟随安装位置。
+
+### 变更：取消"材料包"——采集结果整体并入画像（snapshot 段）
+
+- **现象/根因**：discover 采集结果原先分两处：材料包（`<DATA_ROOT>/discovery/<domain>/`
+  的 pack.json + report.md + captures/）与画像 draft（只有知识骨架）。用户定调：
+  **不存在材料包这个概念**，采集产物就是画像本身——元素快照（交互元素标识）、
+  每页链接、控件、结构线索、XHR 响应体都应在画像里。
+- **修法**：`discover.js` 的 `buildDraftSkeleton` 新增 `snapshot: {capturedAt, pages,
+  skipped}`，每页 `capture` 直接内嵌响应请求与 body（原 captures/page-NNN.json 落盘取消）；
+  删除 pack.json / report.md / captures 的写出与 `renderReport`/`writePack`；
+  plan 与运行摘要只报 draft 路径。存量两站 draft 已把 pack+captures 并入 snapshot
+  （upwork 815KB / zhipin 1.16MB，各 20 页），材料包目录（含 `_prev` 历史备份与旧
+  verify 残留）已删除。
+- **影响**：画像体积变大（快照占大头），但采集→画像单产物、单路径；agent 补知识字段
+  直接读 draft.snapshot，无需再拼材料包路径。SKILL.md 使用注意、README 路径表与
+  画像生产流程同步改口。
+
+### 变更：采集落点全由程序决定——discover 删除 `--out-dir` / `--draft`
+
+- **动机**：位置约定的旧形态是"旗标可在锚内收窄"（isInside 校验）。用户定调：采集动作
+  全流程由程序控制，**agent 无权指定保存位置**——连"锚内收窄"的能力都不该存在。
+- **修法**：`runner/discover.js` 删除两个位置旗标及其越界校验（isInside 依赖一并移除）；
+  材料包固定 `<DATA_ROOT>/discovery/<domain>/`、draft 固定
+  `<PROFILES_ROOT>/draft/<domain>.json`，路径由程序直接计算；**白名单之外的 `--flag`
+  一律显式拒绝（不静默忽略）**，并有回归测试钉死（test-discover「位置旗标显式拒绝」）。
+  整根重定位只保留操作者层配置：`config set data-root/profile-root/output-dir` 或
+  `WB_*` 环境变量。`paths.js` 关于 `--out` 的陈旧注释、README「路径配置」段落同步改口。
+- **影响**：discover 的调用方（agent）只能传行为参数（预算/深度/会话/--force/--plan），
+  写盘位置完全不可干预。
+
+### 修正：SKILL.md 提示词再瘦身——只留简介段 + 命令表（生成块不动）
+
+- **现象**：提示词里混着「快速启动」「原语直觉」「站点画像（纯数据）」等叙述段，
+  与命令表信息重复（快速启动的两条命令都在表里，站点画像段与「画像生产」段互相
+  解释字段），agent 读起来信息密度低。用户定调：提示词只留"工具是什么"一段 + 命令表。
+- **修法**：SKILL.md 收敛为 frontmatter + 简介段 + `## 命令`（usage 生成块，
+  `usage:sync` 与 test-commands 第三腿原样保留）。「画像生产 / 发现顺序与故障转移 /
+  健康与恢复」三段操作性知识**不丢弃**，整体移入 README 新增「操作：画像生产与
+  链路恢复（agent 工作流）」节（标题降两级）；discover.js / paths.js 里指向
+  SKILL.md 旧小节的注释同步改指 README。
+- **取舍**：agent 触发本 skill 后若需要画像生产/排障细节，需主动读 README——
+  这是"提示词极简"的代价，换取提示词不随流程细节膨胀。
+
+### 变更：去掉 recipes 概念——画像回归纯数据，采集是通用程序
+
+- **现象/根因**：画像文件里嵌着站点专属采集代码（`recipes[].execution.extractFn`），
+  画像从"数据"被污染成"加载即执行的代码"。但采集动作本身是通用的
+  （`runner/discover.js` 对所有站点同一套代码：开页→探针→抓取→材料包），
+  站点专属程序不该住进知识文件——用户拍板：画像只留快照与站点知识（数据），
+  采集数据由 agent 按画像知识即席用桥命令执行。
+- **修法**：
+  - 全部 6 个画像（2 种子 + 2 运行时正式 + 2 draft）删 `recipes`/`replay` 字段，
+    容器从 `.js` 模块翻回 `.json`（函数搬走后 JS 容器无存在理由；schemaVersion→3）；
+  - 退役 `runner/profile-runner.js`（recipe 执行器）与 `runner/serialize-profile.js`
+    （唯一用途是函数画像写盘）；
+  - `discover.js` 只留 `run`：verify 子命令（真跑 + status 盖章）删除，
+    `getOpt`/`ensureProfilesSeeded` 内联回移；draft 骨架改为知识字段
+    （`fieldMap`/`pageNotes` 空占位，无 recipes），落盘 `.json`；
+  - 删 `test/test-runner.js`、`test/test-profiles-live.js`；test-discover 骨架用例
+    改"无代码字段"断言；package.json 去 `profiles:run`/`test:profiles`/`test:all`；
+  - `status` 语义改人审：`draft`（待审）/`reviewed`（人审通过），原 verify 章作废
+    （各画像 `provenance.migration` 留了迁移记录）；
+  - SKILL.md「站点画像」段重写为"纯数据 + 即席采集"，生产流程砍 verify 步，
+    agent 补的是知识字段（fieldMap/limits/antiScrape/params/pageNotes/flows/
+    dataEndpoints），晋级=人审合并 draft 进画像根。
+- **放弃项（决策记录）**："一条命令按画像重采数据"没了（采集逻辑不持久化，
+  现场写、现场跑）；live 契约测试套件（20 例）随 runner 移除；此前记录的字段级
+  质量债（fiverr 死变量等）随 extractFn 一并消失，不再单独还。
+
+### 清理：`scripts/` 开发工具目录退役（并入 agent 或移除）
+
+- **动机**：`scripts/` 是重构过程中 agent 侧造的开发工具目录，装在宿主 agent 的
+  skill 里不合身份；且其中多数工具使命已完成。
+- **处置**：
+  - `sync-usage.js` **并入 `agent/commands.js`**——命令表是单一来源，再生成逻辑放在
+    源头模块里最干净（`usage:sync` 入口变为 `node agent/commands.js usage:sync`，
+    package.json 已改指；新增导出 `syncUsageToSkill`）。漂移守卫机制不变：
+    `npm run usage:sync` 再生成 + test-commands.js 精确比对钉死。
+  - `convert-profile-to-js.js` **删除**——一次性迁移工具，种子与运行时画像全部
+    转换完毕后使命结束（转换记录见「画像存储从 JSON 升级为 JS 模块」条目）。
+    兼容期内 .json 画像仍可被 runner 直接读取执行，只是不再有升级工具；真有旧
+    .json 需要转换时可按该条目记载的口径重写。
+
+### 清理：删除废弃的 `data/` 与 `out/` 运行时残留，README 同步改口
+
+- **现象**：安装目录下还躺着两个旧版运行时目录——`data/`（旧 DATA_ROOT 默认落点，
+  里面只剩 1KB 的 `bridges/probe.json`，10-23 后无人写入）与 `out/`（重构前采集产物
+  的默认输出，45KB 旧文件）。两者都在 .gitignore，纯属遗留。
+- **根因**：重构把数据根挪进宿主客户端（`~/.zcode/synapse-data`）后，旧目录不再被
+  `ensureDataDirs` 等任何路径解析链引用，但也没有人物理清掉；README 里"data/ 是
+  运行时工作区"与 runner 示例里的 `out/<domain>` 也还是重构前的写法。
+- **修法**：删除 `data/`、`out/`（删前验证：全库无代码再拼 `<SKILL_ROOT>/data` 或
+  `<SKILL_ROOT>/out` 路径，mkdir 全部锚在解析后的 DATA_ROOT/PROFILES_ROOT/OUTPUT_ROOT
+  上，删后不会复活）；README 两处改口为当前布局。
+
+### 变更：画像存储从 JSON 升级为 JS 模块（extractFn 真函数 + 自定义序列化器）
+
+- **现象**：画像文件是 .json，抽取逻辑只能以「JSON 字符串里的代码」存在（extractJs）——
+  无语法高亮、无注释、转义地狱；agent 依材料包写 recipe 时最容易在这一步写错。
+- **修法**：画像升级为可执行的 .js 模块（`module.exports = {...}`），抽取逻辑升级为真函数
+  `execution.extractFn`（函数优先于遗留字符串 `extractJs`，至少其一；.json 旧格式进入兼容期，
+  仍可读可执行）。加载按扩展名分派（`loadProfileFile`：.js → require / .json → JSON.parse，
+  每次清 require 缓存，写回后能读到新内容）；`--profile` 裸名与旧 `.json` 写法自动解析到
+  `.js`。种子与运行时画像已全部转换（`scripts/convert-profile-to-js.js <in.json> <out.js>`：
+  IIFE 壳剥成真函数，转换后 validateProfile 自检；空 recipes 的骨架 draft 合法放行）。
+- **序列化器为何存在**：verify 的 status 印章要写回画像文件，而画像现在含函数——
+  JSON.stringify 会把函数静默丢掉（JSON 没有函数类型），写回一次画像就废。新增
+  `runner/serialize-profile.js`：递归 emit JS 字面量（函数 toString 内联、字符串
+  JSON.stringify、2 空格缩进，文件尾固定 `"use strict"` + `module.exports = …;`）；
+  verify 写回与 discover 的 draft 落盘一律走它。函数源码不重排缩进，序列化幂等
+  （写回 N 次逐字节等于写回 1 次）；代价是写回整体重写文件，画像顶层手写注释不保留。
+- **信任边界变化**：画像从「数据文件」变成「加载即执行的代码」（require 画像 = 跑里面的
+  顶层代码）。防线：validateProfile 轻校验抽取源不得含 `require(` / `process.` / `global.`
+  标记（违规给中文报错，宁可误拦）；SKILL.md 明示「画像加载即执行，只放采集知识不放
+  其它代码」。单用户可信本机模型不变，但心智要从「画像=数据」换成「画像=代码」。
+- **偏离记录**：任务书给的 IIFE 壳正则 `/^\(function\(\)\{[\s\S]*\}\(\)\)$/` 尾部字面序列
+  是 `}())`，只匹配 `(function(){…}())` 变体，对本仓库全部现存画像的 `(function(){…})()`
+  形态永远失配（照抄一条都转不了，而验收要求 extractFn 为函数）——转换脚本两种 IIFE
+  形态都接受。另：早期并行实现引入的 `extract` 函数字段名在 `resolveExtractSource` 里
+  保留为兼容回落，`extractFn` 恒优先。
+- **账目**：新增 `runner/serialize-profile.js`、`scripts/convert-profile-to-js.js`；
+  profile-runner.js（loadProfileFile/resolveProfileArg/播种双扩展/越权守卫）与 discover.js
+  （draft 默认 .js、verify 走序列化器写回）改造；SKILL.md/README 画像段落同步；
+  测试新增 loadProfileFile 双格式分派、stringifyProfile 含函数 round-trip（含幂等断言）、
+  越权标记逐个拒绝。
+
+---
+
+### 修正：SKILL.md 提示词补足判断性知识（充分 ≠ 污染回潮）
+
+- **问题**：连续两轮瘦身按"没有它 agent 会不会做错"过滤，把判断性知识也砍了——
+  一个零记忆的 agent 照 92 行的版本能不犯错，但做不好两条用户指令：不知道怎么从
+  材料包判断功能清单、extractJs 怎么写才不踩骨架坑、单功能路线怎么定位与收尾、
+  数据无效时怎么处置。
+- **原则澄清**：删的是机器路径/历史叙事/打包机制（那才是污染），判断性 how-to 是
+  操作必需——两条不冲突。
+- **补足**：快速启动（探活→起桥）、退出码语义与结果处置、原语选用直觉、
+  分析流程细化（可疑未渲染页判别、路由簇×clickables×标题交叉圈功能、噪音排除）、
+  recipe 写法要点（锚语义属性/closest 上溯/整块文本正则/骨架过滤/matchQuery）、
+  数据源判定（DOM vs API，API-first 记待办）、verify 缺参数不猜、单功能补画像
+  独立成节（定位→回问→子树探索→前后 capture 对比→收尾）。
+- **账目**：92 → 171 行（含 40 行生成的用法块），全部是操作 how-to，无路径/历史/打包。
+
+---
+
+### 变更：SKILL.md 内嵌完整用法块（生成 + 精确钉死），提示词自包含
+
+- **决策**：用户拍板提示词要自包含——agent 不该为了知道有哪些命令而先跑一次裸 CLI
+  （多一次往返；不知道某命令存在时连问都不会问）。
+- **实现**：不做手写全表（会重蹈三处漂移），改用生成——scripts/sync-usage.js 把
+  renderUsage() 输出写入 SKILL.md 的 <!-- usage:start/end --> 标记区间（`npm run usage:sync`）；
+  test-commands.js 第三条腿从"命令名出现"升级为**整块精确比对**——命令表任何改动
+  npm test 即红，提示词被迫跟上。原来手写的 8 条示例块与"未列命令"行删除（已含在生成块内）。
+- **账目**：SKILL.md 92 → 128 行，换来自包含；漂移风险由生成 + 测试双重兜住。
+
+---
+
+### 变更：SKILL.md 提示词卫生——位置约定瘦身为操作必需，打包知识移入 README
+
+- **问题**：位置约定章节把 SKILL_ROOT 解析、种子机制、git 入库列、本机路径与 junction
+  说明全写进了 SKILL.md——这是注入模型上下文的提示词，机器细节与打包机制每场会话都在
+  消耗上下文，属于开发者文档的内容。
+- **修正**：SKILL.md 只留 agent 操作必需的两条规则（画像→画像根、数据→数据根）+ config
+  查看命令 + 覆盖旗标的锚内约束 + 环境变量清单（约 40 行 → 20 行）；SKILL_ROOT/种子/
+  入库/平台默认/安装注册的完整表格与说明移入 README「路径配置（打包与数据布局）」。
+- **原则**：SKILL.md 写"怎么用"，README 写"怎么打包与部署"；提示词里不出现本机路径。
+- **第二轮**：位置约定与测试两章整体删除——锚定在代码里、越界由代码报错，agent 不需要
+  预背错误信息；discover 的摘要 JSON 本来就会打印产物绝对路径，`--profile` 裸名自动解析，
+  agent 无需知道实际位置。环境变量/doctor 的 WB_CDP_EXT_DIR 说明由 README 路径配置表承接。
+  SKILL.md 212 → 179 行，只剩操作章节：用法/程序调用/模块/消费/生产/发现顺序/健康恢复。
+- **第三轮（全文精简）**：178 → 108 行。砍掉：仓库/协议介绍与架构图（README 已有）、
+  程序调用章节（README 已有）、模块表（移入 README 并补 paths/api/runner 两行）、
+  click-el/type-el 的 JSON 旧写法（与"传索引"建议矛盾）、画像生产的历史叙事
+  （"此前缺失的前半段…"）与 step1 的探针实现细节括号、守卫表格（压成一行）、
+  重复的登录态声明（前言与消费章节各一次→只留前言）、fiverr 重复示例与 test:profiles
+  引用（README 测试章节已有）。保留判据不变：没有它 agent 会不会做错。
+
+---
+
+### 修正：画像与数据分根——synapse-data 只装采集数据，画像独立 synapse-profiles
+
+- **问题**：上一条把画像运行时副本放进 `<DATA_ROOT>/profiles/`——目录名叫 synapse-data，
+  画像放进去名实不符（data 该是采到的数据，画像是知识资产）。
+- **修正**：paths.js 新增 `resolveProfilesRoot()`/`PROFILES_ROOT`：默认取数据根同级
+  `*-profiles`（basename 去掉 -data 后缀再加 -profiles，避免拼出 synapse-data-profiles），
+  `WB_PROFILES_DIR` / `config set profile-root` 可覆盖；config 命令展示并允许设置
+  profile-root；两个 runner 的画像锚（播种/解析/写回/verify 校验）全部改用 PROFILES_ROOT。
+- **本机迁移**：`config set profile-root ~/.zcode/synapse-profiles`，profiles 与 draft
+  已从 synapse-data 拆出；discovery/output/bridges 留在 synapse-data（名实相符）。
+- **事故记录**：迁移中一次 mv 目标目录不存在（2>/dev/null 吞错）+ 无条件 rm -rf 清源，
+  连带删掉了仓库种子 profiles/*.json 与一份已过时的 draft 备份；种子是 git 跟踪文件，
+  git checkout 无损恢复（fiverr.com.json 上一次未提交的纯格式化改动随回滚消失，内容无差异），
+  运行时副本由种子重新播种。教训：破坏性清理前先验证 mv 成功，2>/dev/null 不该用在 mv 上。
+
+---
+
+### 修正：画像运行时副本与 draft 移出安装目录，数据根注册进宿主客户端主目录
+
+- **问题**：上一条把 draft/正式画像锚在 SKILL_ROOT（安装目录）——违反了 paths.js 自己的
+  原则"安装目录只读，用户数据放用户目录"；且 skill 装进不同 agent 客户端时，运行时写入
+  落在代码检出目录里，随 git/升级流动，位置不受宿主控制。
+- **修正**：画像只活在数据根——正式 `<DATA_ROOT>/profiles/`、draft
+  `<DATA_ROOT>/profiles/draft/`；`<SKILL_ROOT>/profiles/` 降级为**出厂种子**（只读、入库），
+  `ensureProfilesSeeded()` 首次使用时把缺失的种子拷进数据根。`--profile` 解析顺序：
+  数据根内显式路径 → 裸名（补 .json）→ 指向种子的旧写法**自动重定向**到数据根副本
+  （写回永远不落在种子上）→ 其它显式路径原样只读。verify 锚校验同步改到数据根画像目录。
+- **宿主对接**：agent 客户端目前没有公开 per-skill 数据目录契约，"宿主指定"落为安装时
+  的一次注册——`config set data-root` 指进宿主主目录。本机已执行：
+  `C:\Users\Administrator\.zcode\synapse-data`（ZCode），discovery 材料、draft、种子副本
+  已迁移，config.json 本体仍在平台默认目录（与 dataRoot 解耦）。
+- **迁移影响**：`--profile upwork.com.json`（裸名）成为推荐写法；旧写法
+  `--profile profiles/upwork.com.json` 仍可用（自动重定向）；仓库 `profiles/draft/`
+  不再承接运行时写入（.gitkeep 保留防目录消失）。
+
+---
+
+### 变更：位置约定从文档升级为代码执法（路径旗标锚内校验）
+
+- **背景**：上一条把位置约定写进了 SKILL.md，但覆盖旗标（`--out`/`--out-dir`/`--draft`/
+  verify `--profile`）仍接受任意路径——agent 可以用临时旗标把数据写到约定之外。
+- **执法**：paths.js 新增 `isInside(root, p)`（path.relative 归一后判包含，跨盘符/前缀
+  相同/`..` 逃逸都算越界）。四个写入口全部挂上锚内校验：`--out` ⊆ 产物根、
+  `--out-dir` ⊆ 数据根、`--draft` ⊆ `profiles/draft/`、verify `--profile` ⊆ `profiles/`
+  （它要写回 status）。越界报错并给出重定位途径（config / WB_DATA_DIR / SYNAPSE_OUTPUT_DIR）。
+- **测试配套**：test-profiles-live 的 run() 注入 `SYNAPSE_OUTPUT_DIR=<tmp>`，`--out`
+  写临时目录从"任意路径"变成"产物根内的合法收窄"；discover verify 给子进程注入同一
+  环境变量，替代原来传给 runner 的 `--out`。
+- **为何这样设计**：SKILL_ROOT 由运行时向上查找 SKILL.md 得出，skill 装到任何 agent
+  客户端（.zcode/.agents/vendored）相对锚都成立；绝对自由度只保留给用户级显式配置，
+  agent 的每次调用都被限制在两棵约定树内。
+
+---
+
+### 变更：位置约定定死——SKILL_ROOT 管代码与画像，DATA_ROOT 管一切运行时数据
+
+- **背景**：画像/产物位置此前是"文档约定 + 代码硬编码"混着两套口径——SKILL.md
+  一处说产物写仓库 `out/`、另一处说数据根 `output\`；`config set output-dir` 在
+  paths.js 里有完整解析但没有任何 runner 消费（死配置）；discover 的材料包落在
+  仓库 `state/`（gitignore），与"安装目录只读、用户数据放用户目录"的原则不符。
+- **约定**（SKILL.md「位置约定」章节，一条规则一张表）：**代码与画像随 skill 安装
+  位置（SKILL_ROOT）走，一切运行时数据随数据根（DATA_ROOT）走**。正式画像与
+  draft 在 `<SKILL_ROOT>/profiles[/draft]/`（版本化资产，入库）；采集产物在
+  `<DATA_ROOT>/output/<domain>/`；发现材料包在 `<DATA_ROOT>/discovery/<domain>/`；
+  draft 的证据引用指向 DATA_ROOT。
+- **代码**：profile-runner 的产物默认从仓库 `out/` 改为 `resolveOutputRoot()`
+  （OUTPUT_ROOT，config/环境变量从此真正生效）；discover 的材料包默认从
+  `state/discovery/` 改为 `<DATA_ROOT>/discovery/`（接通 DATA_ROOT）；
+  `--out`/`--out-dir`/`--draft` 覆盖旗标不变。
+- **影响**：仓库里的旧 `out/` 与 `state/` 目录不再有新写入；`.gitignore` 条目保留
+  以防历史目录回流。
+
+---
+
+### 变更：新增画像生产层 runner/discover.js（补画像生命周期的前半段）
+
+- **背景**：画像此前只有消费半边（profile-runner 执行 recipes）；生产半边（画像 JSON
+  从哪来）零实现——现有两个画像是探索会话的手工产物，探针与捕获用完即丢
+  （upwork 画像 provenance.sampleSource 指向的 `docs/upwork/p-*.js` 不在仓库里）。
+- **新增**：`runner/discover.js`。`run` = 有界同源爬行（逐页 snapshot/链接/结构探针/
+  capture 留证）→ 材料包 `state/discovery/<domain>/`（pack.json + captures/ + report.md）
+  + `profiles/draft/` 骨架（recipes 留空）；`verify` = 逐 recipe spawn profile-runner
+  真跑（复用校验/off-query/scope 逻辑，不复制），退出码映射 recipe.status 写回 draft。
+- **分工**：程序只做机械守卫（同源、危险词只记不点、表单不提交、预算深度2/20页/10分钟、
+  同域间隔≥2s）与材料留存；功能识别/字段归纳/extractJs 由 agent 依材料包判断，
+  流程写在 SKILL.md「画像生产（discovery）」章节。draft 晋级 `profiles/` 是显式步骤。
+- **关键实现约束**：capture 的时长/截断/triggerJs 走 connect options 而非命令 args
+  （transport.js 的 executeCommand 把 opts 直接喂给 doCaptureMany，args 只有 tabId/action），
+  discover 因此在 connect 时固定 dwellMs/bodyMaxKb。
+- **文本骨架探针（outline）+ 可点容器（clickables）**：DOM 去噪的第一层，硬币两面。
+  outline：TreeWalker 只遍历文本节点映射到持有元素——纯布局包装层不持有文本节点，
+  在采集源头就消失；不走"全元素取 innerText"（layout-dependent API，几千元素会强制
+  reflow）。img 没有 innerText 用 alt 兜底成伪条目；无文本的表单控件不进骨架（由
+  snapshot 的可交互启发式覆盖，两表互补）；条目带 interactive（tag/role/tabindex/onclick）
+  与 cursorPointer 两个机械标志；同签名同文本合并计次。
+  clickables：包装层自己成了可点击卡片（cursor:pointer/tabindex/onclick 且非标准交互
+  标签）——extension snapshot 的候选选择器（input/button/a/[role=…]/[data-testid]）不认
+  它们，骨架表又因无直接文本排除它们，两头盲区；以容器为单位捞回（最外层去重，不炸成
+  内部文本叶子），cap 30。
+- **验证**：test-discover.js 8 例纯函数单测（危险词/同源/URL 归一/入队挑选/预算/骨架），
+  已接入 npm test；真浏览器流程归 test:profiles 同级的 live 验证。
+
+---
+
 ### 变更：鉴权改为两侧内置的固定标识（去掉配对文件与 UI）
 
 - **决定**：保留双向 HMAC 握手，但令牌不再由用户配对，而是扩展与 agent 两侧
