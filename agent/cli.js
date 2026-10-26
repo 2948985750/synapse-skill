@@ -182,7 +182,7 @@ function buildCmd(rest, opts = {}) {
     case "run": {
       const [tabId, exprArg] = args;
       if (!tabId || !exprArg) usage();
-      // @file：Windows argv 不能无损承载长 JS（实测 952 字符的 extractJs 到子进程只剩
+      // @file：Windows argv 不能无损承载长 JS（实测 952 字符的页内表达式到子进程只剩
       // 950 字符，正则被改坏后静默返回 []）。脚本一律走文件，argv 只传路径。
       let expr = exprArg;
       if (expr.startsWith("@")) {
@@ -231,7 +231,7 @@ function buildCmd(rest, opts = {}) {
       if (action === "show") return { cmd: "config", args: { action: "show" } };
       if (action === "reset") return { cmd: "config", args: { action: "reset" } };
       if (action !== "set" || !key) usage();
-      const allowed = { "data-root": "dataRoot", "output-dir": "outputDir" };
+      const allowed = { "data-root": "dataRoot", "output-dir": "outputDir", "profile-root": "profileRoot" };
       const field = allowed[key];
       if (!field) {
         throw Object.assign(new Error("未知配置项 " + key + "（可用：data-root | output-dir）"), { code: "INVALID_CONFIG" });

@@ -3,167 +3,48 @@ name: synapse-skill
 description: 驱动已运行、已登录的 Chrome/Edge（本机回环 WebSocket + 浏览器 MV3 扩展的 chrome.debugger 全量 CDP 透传）。用于读渲染 DOM、点选/输入、跑页内 JS、捕获页面自身 XHR/fetch 响应、复用登录态做网页自动化。无 --remote-debugging-port、无 native messaging、无服务端。触发词：synapse、CDP、驱动浏览器、点选元素、捕获接口响应、复用登录态。
 ---
 
-# synapse-skill（agent 侧桥）
+# synapse-skill
 
-本仓库**只含 node 侧**：CLI、桥发现/注册表、路由、鉴权、doctor。
-浏览器扩展在独立仓库 **[synapse](https://github.com/2948985750/synapse)**，两侧通过
-`127.0.0.1:9521-9540` 的 WebSocket 通信，协议 `wb-cdp-ws/2`。
+驱动已运行、已登录的 Chrome/Edge（本机回环 WebSocket + 浏览器 MV3 扩展的
+`chrome.debugger` 全量 CDP 透传）：读渲染 DOM、点选/输入、跑页内 JS、捕获页面自身
+XHR/fetch 响应、复用登录态做网页自动化。不启动新浏览器、不碰 profile、不伪造
+cookie/请求头。**前提：浏览器已经开着**（登录态在里面）；扩展主动拨入本仓库
+（node 侧）的回环 WS 服务端。站点画像的读取/生产与链路恢复流程见 README。
 
-```
-你的程序 / agent（agent/agent-collect.js）
-      │  本机回环起 WS server
-      ▼  ◄── 扩展 SW 主动拨入（连入即保活；掉线自动重拨）
-扩展（另一仓库：chrome.debugger.attach → CDP 全透传）
-      ▼
-你活着的浏览器标签（登录态在里面）
-```
+## 使用注意
 
-浏览器必须是**已经开着的**——登录态就在里面，本仓库不碰 profile、不复用 cookie 文件。
+- 采集动作全流程由程序控制：**agent 无权指定任何保存位置**。加工与结果全部写入
+  安装位置下的画像目录：`<SKILL_ROOT>/profiles/draft/<domain>.json`（相对安装路径，
+  skill 装到哪画像跟到哪；含可交互元素快照 + 响应体 + 站点知识，跨页框架归并
+  `snapshot.chrome`），**不存在独立的材料包**；
+  换位置只能由装 skill 的人改 `config set profile-root`（或 `WB_PROFILES_DIR`）。
+- 保存/投递/支付类写操作**永不代执行**——只记录，由用户手动做。
+- 用户没有明确要求"抓取接口"时，**不要自动抓取接口**：不主动捕获/分析页面 XHR/fetch
+  响应，也不在画像里补 `dataEndpoints` 等接口信息；默认只采集页面元素与站点知识。
 
-## 用法
+## 命令
 
-```powershell
-# 起常驻桥（一条会话一个；注册 data/bridges/<session>.json）
-node agent/agent-collect.js serve mysession
-
-# one-shot：带 --session 走自己的桥（毫秒级）
-node agent/agent-collect.js status --session mysession
-node agent/agent-collect.js list   --session mysession
-node agent/agent-collect.js open <url> --session mysession
-node agent/agent-collect.js snapshot <tabId> [--max N] --session mysession
-node agent/agent-collect.js click-el <tabId> '{"i":18,"tag":"a","role":"","label":"搜索"}' --session mysession
-node agent/agent-collect.js type-el <tabId> '{"i":3,"tag":"input","role":""}' <text> [--clear]
-node agent/agent-collect.js capture <tabId> <url|reload|wait> --duration <ms> [--filter <re>] [--all]
-node agent/agent-collect.js doctor [--wait <ms>] [--force] [--dry]
-```
-
-`--session <sid>` 与 `WB_SESSION` 等价；**Windows 下用 `--session`**。
-全部命令见 `node agent/agent-collect.js`（用法由 `agent/commands.js` 生成，不再手写）。
-
-**交互命令传索引，不传 JSON**：
-
-```powershell
-node agent/agent-collect.js snapshot 17 --session mysession   # → { items:[{i,tag,role,label}] }
-node agent/agent-collect.js click-el 17 3 --session mysession  # 3 就是 items[].i
-node agent/agent-collect.js type-el  17 2 "hello" --session mysession
-```
-
-`cdp` 的 params 同样避开 shell 引号：`cdp <tab> <method> @params.json` 或 `--param k=v`。
-
-## 程序调用（库入口，完全不过 shell）
-
-```js
-const { connect } = require("./agent/api");
-const browser = await connect({ session: "mysession" });
-const snap = await browser.snapshot(tabId);      // { url, count, items:[{i,tag,role,label}] }
-await browser.click(tabId, snap.items[0].i);     // 传索引即可
-await browser.type(tabId, 2, "hello");
-await browser.close();                            // 必须关：否则桥侧保留这条 client
-```
-
-方法：`tabs / open / closeTab / run / snapshot / click / type / cdp / call`。
-`cdp(tabId, method, params)` 的 `params` 是 JS 对象，没有序列化损耗。
-
-## 模块
-
-| 模块 | 内容 |
-|---|---|
-| `agent-collect.js` | 入口：serve/keep、main、对外导出 |
-| `cli.js` | 参数解析与命令构造（纯函数） |
-| `commands.js` | 命令清单唯一来源，`usage()` 由它渲染 |
-| `transport.js` | WS 连接、级联故障转移、命令执行 |
-| `capture.js` | 网络响应体捕获的结果整形与多标签编排 |
-| `doctor.js` | 体检 + 协调恢复（唯一碰 Windows 细节的模块） |
-| `registry.js` | 桥发现记录（多会话注册表 / 遗留单文件） |
-| `config.js` | 端口段、命令超时、探测时限、锁 TTL |
-| `lib/json-store.js` | JSON 读写 + 原子写（tmp + rename） |
-| `lib/ui.js` | stdout JSON 出口与错误归一化 |
-
-## 站点画像与 runner
-
-执行层（打开页面、跑 `extractJs`、校验字段/条数）在本仓库；站点知识以 JSON 画像的形式放在 `profiles/`，
-由 `runner/profile-runner.js` 驱动，全程走 `agent/api.js`（没有 shell、没有 argv 传参问题）。
-
-```powershell
-# Upwork：搜索 10 条（q/page 两个参数由画像的 URL 模板声明）
-node runner/profile-runner.js --profile profiles/upwork.com.json --task search \
-  --param q="AI automation" --param page=1 --limit 10
-
-# Upwork：按 cipher 打开岗位详情
-node runner/profile-runner.js --profile profiles/upwork.com.json --task job \
-  --param cipher=022113906523751499861
-
-# Fiverr（Pro 会话）：搜索 16 个 freelancer/agency
-node runner/profile-runner.js --profile profiles/fiverr.com.json --task search \
-  --param q="ai automation" --limit 16
-
-# 契约测试（真浏览器，需要已登录 + 活桥）
-npm run test:profiles
-```
-
-- 画像规范：`schemaVersion: 2`，`recipes[]` 里每个 `purpose` 对应一个任务，`execution.kind` 目前支持 `dom-extract`
-  （`openUrlTemplate` + `extractJs` + `requiredFields` + `minItems` + `settleMs`）。
-- `--limit` 只是**上限**，不是下限；`minItems` 才是门槛。0 条一律 `blank`（不算成功）。
-- SPA 首次渲染慢时会自动重试抓取（`--retry-ms`，默认 6s）。
-- 产物默认写 `out/<domain>/<task>.json`（`.gitignore` 已忽略）；`--out` 可改。
-- 需要登录态的站点复用浏览器真实会话，不伪造请求头。
-
-**默认采集范围**（用户没说明时）：只抓第 1 页、条数取 recipe 的 `defaults.limit`、不翻页、不点"加载更多"；
-`--limit` 超过 `maxLimit` 直接拒绝；写操作（如 Upwork 的 save/unsave flow）默认不执行。
-摘要里的 `scope:{page,limit,maxLimit,showMore,pages}` 就是本次实际范围。
-
-## 发现顺序与故障转移
-
-`WB_BRIDGE_FILE`（遗留独占）→ 会话桥（`--session` / `WB_SESSION`）→ 其它活桥
-（`ts` 降序）→ 遗留 `data/bridge.json` → 全失败才回落 60s 直连慢路径。
-daemon 被强杀留下的死条目，下次发现时自动清理。
-
-## 健康与恢复
-
-- `status`：<2s 有界探活；无活桥立即 `NO_BRIDGE`，不等不回落。
-- 桥活但扩展黑坑（MV3 SW 挂起）：`bridgeAlive:true + extension:null` → 跑 `doctor`。
-- `doctor`：快查 → 礼貌等待 60s（探针端口 / 活桥 SW 重拨）→ 维护锁内协调硬刷。
-  **多会话统一走 doctor，不要各自手杀浏览器**。
-  硬刷默认只杀**本工具启动的** Edge（pid 记在 `data/edge.pid`）；要像旧版那样杀所有
-  `msedge.exe`（会连带你自己正在用的窗口）必须显式 `--force-kill`。
-  **硬刷只实现了 Edge**（`msedge.exe` + Edge 默认 profile）；用 Chrome 时 `list/open/run`
-  等命令照常工作，只是 `doctor` 不会去重启 Chrome，需要手工恢复。
-
-## 路径与数据归属
-
-**扩展不写盘**（MV3 只有 `chrome.storage.local`，只放诊断日志）。采集结果全部由 node 侧
-决定和落盘，默认在**用户目录**，不在安装目录：
-
-```
-Windows  %LOCALAPPDATA%\Synapse\
-macOS    ~/Library/Application Support/Synapse/
-Linux    ~/.local/share/synapse/        （或 $XDG_DATA_HOME）
-
-<数据根>\
-├── config.json     路径配置（dataRoot / outputDir）
-├── bridges\        桥注册表（每会话一个 json）
-├── output\         采集产物（api-first、experiment…）
-└── maintenance.log doctor 维护日志
-```
-
-解析顺序：`WB_DATA_DIR`（或 `SYNAPSE_OUTPUT_DIR`）> `config.json` > 平台默认。
-
-首次使用时由使用方指定位置：
-
-```powershell
-node agent/agent-collect.js config                       # 看当前路径与来源
-node agent/agent-collect.js config set data-root D:\synapse-data
-node agent/agent-collect.js config set output-dir D:\synapse-data\out
-node agent/agent-collect.js config reset                 # 回到默认
-```
-
-其它可覆盖项：`WB_BRIDGE_DIR` / `WB_BRIDGE_FILE` / `WB_CDP_EXT_DIR` / `WB_EDGE_EXE` /
-`WB_AGENT_WS_START|END`。
-`doctor` 的硬刷需要 `WB_CDP_EXT_DIR` 指向含 `manifest.json` 的扩展根（即 synapse 仓库的 `extension/`）。
-
-## 测试
-
-```powershell
-npm test     # bridge 28 + 命令表漂移守卫 + review 回归 2 例
-npm run verify
-```
+<!-- usage:start -->
+- `list` —— 列出所有标签页：tabId/标题/URL——一切后续命令的 tabId 从这里拿
+- `navigate <tabId> <url>` —— 复用已有标签页导航到新 URL；默认等 load 完成，--nowait 跳过等待
+- `cdp <tabId> <method> ['<params-json>'|@file] [--param k=v ...]` —— 任意 CDP 方法透传；@file 免 shell 引号，--param k=v 可追加/覆盖 params 里的键，JS 对象无序列化损耗
+- `run <tabId> '<js-expression>'` —— Runtime.evaluate 跑页内 JS；默认 awaitPromise 等 promise 落定，--sync 不等
+- `open <url>` —— 开新标签页；默认等 load 完成，返回 loaded；--nowait 跳过等待
+- `open-frame <tabId> '<url-regex>'` —— 把匹配的子帧开成顶层标签——跨源 iframe 内容回退
+- `close <tabId>` —— 关闭标签页；discover 自管标签生命周期，这条一般只在手工交互时用
+- `setfile <tabId> <selector> <file-path>` —— 给 input[type=file] 塞本地文件，走 CDP DOM.setFileInputFiles
+- `attach <tabId>` —— 手动把调试器附加到标签——桥执行命令时会自动 attach，这条只做排障用
+- `detach <tabId>` —— 解除标签上的调试器，attach 之后想彻底释放用这条
+- `diag` —— 诊断快照：日志环形缓冲、最近弹窗记录、capture 会话状态——排障第一步
+- `capture <tabId> <url|reload|wait> [--duration ms] [--filter <re>] [--body-max kb] [--all]` —— 网络响应体捕获：触发导航/重载后抓该标签的 XHR/fetch 请求 + 响应体
+- `capture-many <tabId:action> [<tabId:action> ...] [--duration ms] [--filter <re>] [--body-max kb] [--all]` —— 多标签并行网络捕获：不同 tab 各开一个 capture session，tabId 必须互不相同（同 tab + 同 client 的 capture session 互斥）；action 同 capture
+- `config [set <key> <dir> | reset]` —— 显示数据目录与来源；config set data-root <dir> 指定数据根、config set output-dir <dir> 指定采集产物根、config set profile-root <dir> 指定画像根；config reset 清掉自定义路径回到默认。纯本地命令，不需要连桥
+- `status` —— 有界健康探测：总时限 1.8 秒；多桥时逐个试连，任一桥可达即返回
+- `doctor [--wait <ms>] [--force] [--force-kill] [--dry]` —— 链路医生 + 多会话协调恢复：快查 → 礼貌等待 SW 重拨（探针端口/活桥，默认 --wait 60s）→ 锁协调硬刷（data/maintenance.lock.json，同一时刻只有一个会话执行 taskkill+清缓存+重启 Edge，排上的会话等锁释放后复查健康）。多会话恢复统一走 doctor，不要各自手杀 Edge；--force 跳过等待，--dry 只打印计划
+- `serve [session] [--shared]` —— 常驻 bridge：持有 WS 端口 + 保活扩展 SW，注册 data/bridges/<session>.json；session 省略时自动生成并打印。one-shot 发现顺序：--session/WB_SESSION 指定桥 → 其它活桥（最新优先）→ 直连慢路径；多会话各起各的 serve 互不覆盖。--shared 额外写 data/bridge.json 兼容遗留脚本。Ctrl+C 退出
+- `snapshot <tabId> [--max N]` —— 索引化动作空间：枚举可交互控件 [{i,tag,role,label}]
+- `click-el <tabId> <i|el-json> [--label <text>]` —— 按 snapshot 索引点击；--label 参与漂移校验（索引越界/label 变了会拒绝执行）
+- `type-el <tabId> <i|el-json> <text> [--clear] [--label <text>]` —— 按索引键入，兼容受控组件（native value setter + input/change 事件）；--clear 先清空；<i> 来自 snapshot 条目，旧的完整 JSON 写法仍兼容
+- 选项: --wait <ms>  --keep  --max <N>  --clear  --label <text>  --param k=v  --sync  --nowait  --client-id <id>  --trigger-js <expr>  --session <sid>  --shared  --force  --force-kill  --dry
+- 多会话: WB_SESSION=<sid>（本会话 one-shot 优先走 data/bridges/<sid>.json）；--keep 也会注册为临时会话桥（注册表条目 + 允许多客户端），供同会话后续 one-shot 毫秒级复用
+<!-- usage:end -->

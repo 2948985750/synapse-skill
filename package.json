@@ -8,12 +8,11 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node test/test-bridge.js && node test/test-commands.js && node test/test-regressions.js && node --test test/test-runner.js",
+    "test": "node test/test-bridge.js && node test/test-commands.js && node test/test-regressions.js && node --test test/test-discover.js",
     "test:agent": "node test/test-bridge.js",
     "test:commands": "node test/test-commands.js",
     "verify": "node --check agent/agent-collect.js && npm test",
-    "profiles:run": "node runner/profile-runner.js",
-    "test:profiles": "node --test test/test-profiles-live.js",
-    "test:all": "npm test && npm run test:profiles"
+    "discover": "node runner/discover.js",
+    "usage:sync": "node agent/commands.js usage:sync"
   }
 }

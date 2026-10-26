@@ -72,7 +72,7 @@ function writeConfig(patch) {
   return next;
 }
 
-function resetConfig(keys = ["dataRoot", "outputDir"]) {
+function resetConfig(keys = ["dataRoot", "outputDir", "profileRoot"]) {
   const cfg = readConfig();
   for (const k of keys) delete cfg[k];
   cfg.updatedAt = new Date().toISOString();
@@ -95,7 +95,8 @@ function resolveDataRoot(config = readConfig()) {
 const DATA_RESOLVED = resolveDataRoot();
 const DATA_ROOT = DATA_RESOLVED.value;
 
-// 采集产物根：agent 可以用 --out 决定；默认 <data>/output。
+// 采集产物根：程序计算，无 agent 旗标；重定位只能走操作者层配置
+// （SYNAPSE_OUTPUT_DIR / config output-dir）。默认 <data>/output。
 function resolveOutputRoot(config = readConfig(), dataRoot = DATA_ROOT) {
   if (process.env.SYNAPSE_OUTPUT_DIR) {
     return { value: path.resolve(process.env.SYNAPSE_OUTPUT_DIR), source: "env:SYNAPSE_OUTPUT_DIR" };
@@ -106,6 +107,28 @@ function resolveOutputRoot(config = readConfig(), dataRoot = DATA_ROOT) {
   return { value: path.join(dataRoot, "output"), source: "default" };
 }
 const OUTPUT_ROOT = resolveOutputRoot().value;
+
+// 画像根：相对安装位置（SKILL_ROOT）——skill 装到哪，画像就跟着落在哪的 profiles/ 下。
+// 安装位若是 junction（本机 ~/.zcode/skills/synapse-skill → 源码仓），写入即落源码仓。
+// WB_PROFILES_DIR / config.profileRoot 仍可整体重定位（操作者层，非 agent 旗标）。
+function resolveProfilesRoot(config = readConfig()) {
+  if (process.env.WB_PROFILES_DIR) {
+    return { value: path.resolve(process.env.WB_PROFILES_DIR), source: "env:WB_PROFILES_DIR" };
+  }
+  if (typeof config.profileRoot === "string" && config.profileRoot.trim()) {
+    return { value: path.resolve(config.profileRoot), source: "config:profileRoot" };
+  }
+  return { value: path.join(SKILL_ROOT, "profiles"), source: "default" };
+}
+const PROFILES_ROOT = resolveProfilesRoot().value;
+
+// 包含性判定：p 是否在 root 目录内（含等于 root）。跨盘符/绝对路径逃逸都算不在内。
+// 位置约定的执法器：所有路径覆盖旗标只能落在对应锚内（README「路径配置」），
+// agent 不能用临时旗标把数据写到约定之外——整体重定位走 config/WB_DATA_DIR/SYNAPSE_OUTPUT_DIR。
+function isInside(root, p) {
+  const rel = path.relative(path.resolve(root), path.resolve(p));
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
 
 // 桥注册表目录（多会话）：<data>/bridges
 const BRIDGE_DIR = process.env.WB_BRIDGE_DIR
@@ -137,6 +160,7 @@ function describePaths() {
     configFile: CONFIG_FILE,
     dataRoot: data,
     outputDir: output,
+    profilesRoot: resolveProfilesRoot(config, data.value),
     bridgeDir: path.join(data.value, "bridges"),
     skillRoot: SKILL_ROOT,
   };
@@ -187,6 +211,9 @@ module.exports = {
   resetConfig,
   resolveDataRoot,
   resolveOutputRoot,
+  resolveProfilesRoot,
+  PROFILES_ROOT,
+  isInside,
   describePaths,
   ensureDataDirs,
   resolveExtDir,

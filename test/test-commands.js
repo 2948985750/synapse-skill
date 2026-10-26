@@ -8,7 +8,7 @@ const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
 
-const { COMMANDS, NAMES, renderUsage } = require("../agent/commands");
+const { COMMANDS, NAMES, renderUsage, renderList } = require("../agent/commands");
 
 const cliSrc = fs.readFileSync(path.join(__dirname, "..", "agent", "cli.js"), "utf8");
 const implemented = [...cliSrc.matchAll(/case "([a-z0-9-]+)":/g)].map((m) => m[1]);
@@ -25,6 +25,20 @@ assert.deepStrictEqual(
   missingInCode,
   [],
   "命令表里有但 buildCmd 没实现：" + missingInCode.join(", "),
+);
+
+// 第三条腿：提示词。SKILL.md 内嵌 renderUsage() 的完整输出（<!-- usage:start/end -->
+// 标记区间），agent 无需跑裸 CLI 即可看到全部命令及注释。命令表任何改动都会让这个
+// 精确比对失败——跑 `npm run usage:sync` 重新生成即可。
+const skillSrc = fs.readFileSync(path.join(__dirname, "..", "SKILL.md"), "utf8");
+const usageBlock = skillSrc.match(
+  /<!-- usage:start -->\n([\s\S]*?)\n<!-- usage:end -->/,
+);
+assert.ok(usageBlock, "SKILL.md 缺 <!-- usage:start/end --> 用法块");
+assert.strictEqual(
+  usageBlock[1].trim(),
+  renderList().trim(),
+  "SKILL.md 的用法列表与命令表漂移：跑 npm run usage:sync 重新生成",
 );
 
 // 重名会让 usage 出现两条、parse 时也说不清谁优先。
