@@ -1,6 +1,21 @@
 ---
 name: synapse-skill
+display_name: 浏览器操控与站点画像
+display_name_en: Browser Control & Site Profiles
 description: 驱动已运行、已登录的 Chrome/Edge（本机回环 WebSocket + 浏览器 MV3 扩展的 chrome.debugger 全量 CDP 透传）。用于读渲染 DOM、点选/输入、跑页内 JS、捕获页面自身 XHR/fetch 响应、复用登录态做网页自动化。无 --remote-debugging-port、无 native messaging、无服务端。触发词：synapse、CDP、驱动浏览器、点选元素、捕获接口响应、复用登录态。
+description_zh: 复用真实登录态驱动 Chrome/Edge：读渲染 DOM、点选输入、跑页内 JS、抓 XHR 响应、批量采集站点画像
+description_en: Drive a real logged-in Chrome/Edge for DOM reading, clicking/typing, in-page JS, XHR capture and site-profile collection
+version: 0.1.0
+author: 凌惜
+allowed-tools: Bash
+examples_zh:
+  - "把这个页面上所有可交互元素列出来"
+  - "读取这条推文的正文、作者和互动数据"
+  - "给这个网站采一份画像，标出各功能的入口和字段"
+examples_en:
+  - "List every interactive element on this page"
+  - "Read the text, author and engagement of this post"
+  - "Collect a site profile and mark each feature's entry point and fields"
 ---
 
 # synapse-skill
@@ -11,7 +26,10 @@ XHR/fetch 响应、复用登录态做网页自动化。不启动新浏览器、�
 cookie/请求头。**前提：浏览器已经开着**（登录态在里面）；扩展主动拨入本仓库
 （node 侧）的回环 WS 服务端。站点画像的读取/生产与链路恢复流程见 README。
 
-## 使用注意
+**入口**：`node "${CLAUDE_SKILL_DIR}/agent/agent-collect.js" <命令>`；客户端没有
+`CLAUDE_SKILL_DIR` 时，用技能安装目录下的同一相对路径 `agent/agent-collect.js`。
+
+## 注意事项
 
 - 采集动作全流程由程序控制：**agent 无权指定任何保存位置**。加工与结果全部写入
   安装位置下的画像目录：`<SKILL_ROOT>/profiles/draft/<domain>.json`（相对安装路径，
@@ -21,6 +39,26 @@ cookie/请求头。**前提：浏览器已经开着**（登录态在里面）；
 - 保存/投递/支付类写操作**永不代执行**——只记录，由用户手动做。
 - 用户没有明确要求"抓取接口"时，**不要自动抓取接口**：不主动捕获/分析页面 XHR/fetch
   响应，也不在画像里补 `dataEndpoints` 等接口信息；默认只采集页面元素与站点知识。
+
+## 边界情况
+
+- **页面未渲染完**：snapshot/run 结果为空或明显偏少 → 等 1–2 秒重试，仍空就 navigate
+  重载一次；不要把"没加载出来"当作"没有功能"。
+- **索引失效**：snapshot 的索引只在当次有效；导航/刷新/页面更新后必须重新 snapshot。
+  click-el/type-el 返回 `found:false` 或 label 漂移时重抓索引，不要猜。
+- **登录墙/登录过期**：出现登录表单或跳转登录页 → 请用户手动登录；不代填密码/验证码，
+  不伪造 cookie。
+- **反爬信号**（验证码、`_security_check`、429/5xx 频发）：停止重试、拉大间隔（≥2s），
+  带证据报告；不尝试绕过验证码。
+- **跨源 iframe**：主文档读不到内容时用 `open-frame` 把匹配的子帧开成顶层标签再操作。
+- **懒加载/虚拟列表**：只渲染可视区 → 先滚动再 snapshot；"加载更多"按文本找可点容器。
+- **capture 抓不到请求**：只能抓会话开始后触发的请求；先开 capture（或 reload）再执行
+  动作，最后 wait。
+- **多标签抓包**：`capture-many` 的 tabId 必须互不相同；同 tab 同 client 的 capture 会话互斥。
+- **写操作**（保存/投递/支付/删除/退出登录）：永不代执行，只给入口和步骤让用户自己做。
+- **能力之外**（无头运行、批量多账号、绕过验证码/风控、破解付费内容）：直接说明做不到，
+  给替代方案。
+- **出错时**：先跑 `diag` 取诊断，把原始错误和证据带给用户；不编造结果。
 
 ## 命令
 
