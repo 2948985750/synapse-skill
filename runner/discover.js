@@ -407,18 +407,26 @@ function pruneStructure(structure, { maxLists = 8 } = {}) {
   return { ...structure, lists };
 }
 
-// 响应体只留同源或 JSON——第三方埋点/广告对采集知识无价值。
+// 响应体只留 fetch/xhr（真正的数据接口）；同源静态资源（图片/字体/脚本/样式/文档）
+// 一律丢弃——它们对采集知识无价值，还会把画像撑到 MB 级。
+// 例外：Content-Type 是 JSON 的（即便 resourceType 标成 document/other）仍保留。
+// 注意：站点常把图片/字体也用 XHR 拉（如 WhatsApp 的 emoji 雪碧图 type=XHR, mime=image/webp），
+// 所以先按 MIME 判二进制，再看 resourceType。
 function pruneCapture(capture, origin) {
   if (!capture || !Array.isArray(capture.requests)) return capture;
+  const STATIC_EXT =
+    /\.(png|jpe?g|gif|webp|avif|svg|ico|woff2?|ttf|otf|eot|css|js|mjs|map|html?|wasm|mp4|mp3|webm|pdf)(\?|#|$)/i;
+  const BINARY_MIME =
+    /^(image|font|audio|video)\/|application\/(octet-stream|zip|gzip|pdf|wasm|vnd\.ms-)/i;
   const requests = capture.requests.filter((r) => {
     const u = String((r && r.url) || "");
-    if (/json/i.test(String((r && r.mimeType) || ""))) return true;
-    if (/json/.test(u)) return true;
-    try {
-      return new URL(u).origin === origin;
-    } catch (_) {
-      return false;
-    }
+    const t = String((r && r.type) || "").toLowerCase();
+    const mime = String((r && r.mimeType) || "");
+    if (BINARY_MIME.test(mime)) return false;
+    if (t === "xhr" || t === "fetch") return true;
+    if (/json/i.test(mime)) return true;
+    if (/json/i.test(u) && !STATIC_EXT.test(u)) return true;
+    return false;
   });
   return { ...capture, requests };
 }
