@@ -2,6 +2,7 @@
 // cli：参数解析与命令构造（不碰网络；params 支持 @file，其余仍是纯函数，便于单测）。
 const fs = require("fs");
 const { renderUsage } = require("./commands");
+const { buildGestureExpr, isAsyncAct } = require("./gestures");
 
 function codedError(code, message) {
   const error = new Error(message);
@@ -56,6 +57,14 @@ function parseArgs(argv) {
   let force = false;
   let forceKill = false;
   let dry = false;
+  // 手势族旗标（全量交互原语）：
+  //   --hold <ms>       longpress-el 按住时长（省略则扩展默认 600ms）
+  //   --delta <px>      scroll-el 像素增量（省略则 into-view 滚入视口）
+  //   --modifiers <list> key-el 修饰键（ctrl/shift/alt/meta 逗号分隔，或裸位掩码 0-15）
+  let hold = null;
+  let delta = null;
+  let modifiers = "";
+  let hscroll = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--wait") waitMs = Number(argv[++i]) || waitMs;
@@ -91,6 +100,10 @@ function parseArgs(argv) {
     else if (a === "--force") force = true;
     else if (a === "--force-kill") forceKill = true;
     else if (a === "--dry") dry = true;
+    else if (a === "--hold") hold = Number(argv[++i]);
+    else if (a === "--delta") delta = Number(argv[++i]);
+    else if (a === "--modifiers") modifiers = argv[++i] || "";
+    else if (a === "--hscroll") hscroll = true;
     else rest.push(a);
   }
   return {
@@ -114,6 +127,10 @@ function parseArgs(argv) {
     force,
     forceKill,
     dry,
+    hold,
+    delta,
+    modifiers,
+    hscroll,
   };
 }
 
@@ -124,19 +141,59 @@ function buildCmd(rest, opts = {}) {
   // el 参数两种写法都接受：
   //   click-el <tab> 3                 ← 裸索引（PowerShell/cmd 里不用碰 JSON 引号）
   //   click-el <tab> '{"i":3,...}'     ← 兼容旧写法（完整快照条目）
-  // 索引由 snapshot 给出，扩展端执行前仍会重解析校验（越界/label 漂移 → found:false）。
-  function parseElArg(raw, label) {
-    const text = String(raw).trim();
-    if (/^\d+$/.test(text)) {
-      const el = { i: Number(text) };
-      if (label) el.label = label;
-      return el;
+    // 索引由 snapshot 给出，扩展端执行前仍会重解析校验（越界/label 漂移 → found:false）。
+    // 也接受 {"sel":"css"}：直接按 CSS 选择器定位（容器/画布等非候选节点，scroll/swipe/select-text 用）。
+    function parseElArg(raw, label) {
+      const text = String(raw).trim();
+      if (/^\d+$/.test(text)) {
+        const el = { i: Number(text) };
+        if (label) el.label = label;
+        return el;
+      }
+      try {
+        const el = JSON.parse(text);
+        if (el && typeof el.i === "number") return label ? { ...el, label } : el;
+        if (el && typeof el.sel === "string" && el.sel) return { sel: el.sel };
+      } catch (_) {}
+      return null;
     }
-    try {
-      const el = JSON.parse(text);
-      if (el && typeof el.i === "number") return label ? { ...el, label } : el;
-    } catch (_) {}
-    return null;
+  // --modifiers：key-el 修饰键。接受逗号分隔的名单（ctrl/shift/alt/meta，别名
+  // control/cmd）或裸位掩码数字；映射与扩展端 key act 一致（Alt1|Ctrl2|Meta4|Shift8）。
+  // 未知词抛错，避免拼错修饰键静默变成无修饰。
+  function parseModifiers(spec) {
+    if (spec === undefined || spec === null || spec === "") return 0;
+    const s = String(spec).trim();
+    if (/^\d+$/.test(s)) return Number(s) & 15;
+    let mod = 0;
+    const names = new Set(s.toLowerCase().split(",").map((t) => t.trim()).filter(Boolean));
+    if (names.size === 0) return 0;
+    const map = { alt: 1, ctrl: 2, control: 2, meta: 4, cmd: 4, shift: 8 };
+    for (const name of names) {
+      if (!(name in map))
+        throw codedError(
+          "INVALID_MODIFIERS",
+          "未知修饰键 '" + name + "'（可用：alt|ctrl|meta|shift，逗号分隔；或位掩码 0-15）",
+        );
+      mod |= map[name];
+    }
+    return mod & 15;
+  }
+  // 手势命令发射：页内 JS 由 agent/gestures.js 构造，走通用 cdp Runtime.evaluate 通道
+  // （扩展只当基建，不认具名手势命令；扩展 0.15.1 即支持）。async 手势带 awaitPromise。
+  function gestureCmd(act, tabId, el, value) {
+    const expression = buildGestureExpr(act, el, value);
+    return {
+      cmd: "cdp",
+      args: {
+        tabId: Number(tabId),
+        method: "Runtime.evaluate",
+        params: {
+          expression,
+          returnByValue: true,
+          awaitPromise: isAsyncAct(act),
+        },
+      },
+    };
   }
   const [cmd, ...args] = rest;
   switch (cmd) {
@@ -225,7 +282,7 @@ function buildCmd(rest, opts = {}) {
     case "diag":
       return { cmd: "diag" };
     case "config": {
-      // 纯本地命令：查看/设置用户数据目录，不需要连桥。
+      // 纯本地命令：查看/设置用户数据目录，无需扩展连入。
       const [action, key, value] = args;
       if (!action) return { cmd: "config", args: { action: "show" } };
       if (action === "show") return { cmd: "config", args: { action: "show" } };
@@ -274,25 +331,128 @@ function buildCmd(rest, opts = {}) {
       return { cmd: "snapshot", args: { tabId: Number(tabId), max: snapMax } };
     }
     case "click-el": {
-      // <tabId> <el-json>：el-json = snapshot 返回条目 {"i":3,"tag":"button","label":"搜索"}
-      // 扩展端执行前重解析校验（索引越界/label 漂移 → found:false 不执行）。
+      // <tabId> <i|el-json|sel-json>：el = snapshot 条目 {"i":3,"tag":"button","label":"搜索"}。
+      // 页内 JS 走 agent/gestures.js（与 13 手势同一构造器），经通用 cdp 通道发射；
+      // 执行前重解析（索引越界/label 漂移 → found:false 不执行）。
       const [tabId, elArg] = args;
       if (!tabId || !elArg) usage();
       const el = parseElArg(elArg, labelOpt);
       if (!el) usage();
-      return { cmd: "click-el", args: { tabId: Number(tabId), el } };
+      return gestureCmd("click", tabId, el, "");
     }
     case "type-el": {
-      // <tabId> <el-json> <text> [--clear]：键入文本（native value setter + input/change
-      // 事件，兼容受控组件）；--clear 先清空。
+      // <tabId> <i|el-json|sel-json> <text> [--clear]：键入文本（native value setter +
+      // input/change 事件，兼容受控组件）；--clear 先清空。走通用 cdp 通道。
       const [tabId, elArg, text] = args;
       if (!tabId || !elArg || text === undefined) usage();
       const el = parseElArg(elArg, labelOpt);
       if (!el) usage();
-      return {
-        cmd: "type-el",
-        args: { tabId: Number(tabId), el, text, clear },
-      };
+      const value = clear ? "__CLEAR__" + text : text;
+      return gestureCmd("type", tabId, el, value);
+    }
+    // ---- 手势族（全量交互原语）：与扩展端命令名一一对应，均基于 snapshot 索引 el{i,label}，
+    // 页内合成事件（isTrusted:false，信任级别同 click-el）。只认受信输入的站点走 cdp 通道。 ----
+    case "hover-el":
+    case "dblclick-el":
+    case "rightclick-el":
+    case "focus-el":
+    case "touch-el": {
+      // <tabId> <i|el-json|sel-json>：单索引手势（悬停/双击/右键/聚焦/触摸点按）。
+      // 页内 JS 走 agent/gestures.js，经通用 cdp 通道发射（扩展不认具名手势命令）。
+      const act = {
+        "hover-el": "hover",
+        "dblclick-el": "dblclick",
+        "rightclick-el": "contextmenu",
+        "focus-el": "focus",
+        "touch-el": "touch",
+      }[cmd];
+      const [tabId, elArg] = args;
+      if (!tabId || !elArg) usage();
+      const el = parseElArg(elArg, labelOpt);
+      if (!el) usage();
+      return gestureCmd(act, tabId, el, "");
+    }
+    case "longpress-el": {
+      // <tabId> <i|el-json|sel-json> [--hold <ms>]：先按下、按住 hold 毫秒再抬起（异步，
+      // awaitPromise）；省略 --hold 默认 600ms
+      const [tabId, elArg] = args;
+      if (!tabId || !elArg) usage();
+      const el = parseElArg(elArg, labelOpt);
+      if (!el) usage();
+      const hold =
+        opts.hold != null && Number(opts.hold) > 0 ? String(Number(opts.hold)) : "";
+      return gestureCmd("longpress", tabId, el, hold);
+    }
+    case "scroll-el": {
+      // <tabId> [<i|el-json|sel-json>] [--delta <px>] [--hscroll]：省略 el 做页面级滚动
+      // （target=document.body）；--hscroll 水平轴（轮播/可滚容器）；省略 --delta 则
+      // into-view 滚入视口。el 可为 snapshot 索引或 {"sel":"css"} 直接定位容器。
+      const [tabId, elArg] = args;
+      if (!tabId) usage();
+      const el = elArg !== undefined ? parseElArg(elArg, labelOpt) : null;
+      if (elArg !== undefined && !el) usage();
+      const value = JSON.stringify({
+        axis: opts.hscroll ? "h" : "v",
+        delta: opts.delta == null ? null : Number(opts.delta),
+      });
+      return gestureCmd("scroll", tabId, el, value);
+    }
+    case "swipe-el": {
+      // <tabId> <from-i|json> <to-i|json|sel-json>：触摸滑动（touchstart→touchmove×4→
+      // touchend）。移动端模拟/下拉刷新/触摸轮播；from/to 是 snapshot 索引或 {"sel":"css"}。
+      const [tabId, fromArg, toArg] = args;
+      if (!tabId || !fromArg || !toArg) usage();
+      const from = parseElArg(fromArg, labelOpt);
+      const to = parseElArg(toArg, "");
+      if (!from || !to) usage();
+      return gestureCmd("swipe", tabId, from, JSON.stringify(to));
+    }
+    case "select-text-el": {
+      // <tabId> <i|el-json|sel-json> [text]：选中元素内文本（省略 text = 选全部；子串可跨
+      // text-node）落入 selection；复制流随后 run `document.execCommand('copy')`。
+      const [tabId, elArg, text] = args;
+      if (!tabId || !elArg) usage();
+      const el = parseElArg(elArg, labelOpt);
+      if (!el) usage();
+      return gestureCmd("select-text", tabId, el, text === undefined ? "" : text);
+    }
+    case "key-el": {
+      // <tabId> <key> [<i|el-json|sel-json>] [--modifiers ctrl,shift]：键事件（异步，
+      // awaitPromise）；key = Enter/a/ArrowUp 等；省略 el 则打到 document.body；
+      // --modifiers 逗号名单（ctrl/shift/alt/meta）或位掩码
+      const [tabId, keyArg, elArg] = args;
+      if (!tabId || !keyArg) usage();
+      const el = elArg !== undefined ? parseElArg(elArg, labelOpt) : null;
+      if (elArg !== undefined && !el) usage();
+      const mod = parseModifiers(opts.modifiers);
+      const value = JSON.stringify({ key: keyArg, code: "", mod });
+      return gestureCmd("key", tabId, el, value);
+    }
+    case "select-el": {
+      // <tabId> <i|el-json|sel-json> <value>：给 <select> 选一个 option（value = option 的 value）
+      const [tabId, elArg, value] = args;
+      if (!tabId || !elArg || value === undefined) usage();
+      const el = parseElArg(elArg, labelOpt);
+      if (!el) usage();
+      return gestureCmd("select", tabId, el, value);
+    }
+    case "media-el": {
+      // <tabId> <i|el-json|sel-json> [play|pause|mute|unmute]：媒体控制，缺省 play
+      const [tabId, elArg, action] = args;
+      if (!tabId || !elArg) usage();
+      const el = parseElArg(elArg, labelOpt);
+      if (!el) usage();
+      return gestureCmd("media", tabId, el, action || "play");
+    }
+    case "drag-el": {
+      // <tabId> <from-i|json> <to-i|json|sel-json>：HTML5 拖放（dragstart→drop→dragend
+      // 全序列，带 DataTransfer）；from/to 都是 snapshot 索引或 {"sel":"css"}
+      const [tabId, fromArg, toArg] = args;
+      if (!tabId || !fromArg || !toArg) usage();
+      const from = parseElArg(fromArg, labelOpt);
+      const to = parseElArg(toArg, "");
+      if (!from || !to) usage();
+      return gestureCmd("drag", tabId, from, JSON.stringify(to));
     }
     case "capture-many": {
       // <tabId:action> pairs；action 同 capture（URL | reload | wait）；
@@ -340,6 +500,12 @@ function buildCmd(rest, opts = {}) {
       }
       return { cmd: "capture-many", args: { pairs } };
     }
+    case "discover":
+    case "actions":
+      // 委托子命令：实际分派在 agent-collect.js main() 的 parseArgs 之前（参数原样透传
+      // 给 runner 程序——各自的旗标白名单/退出码语义不同，全局 parseArgs 会双吃
+      // --param/--dry/--session/--force）。此分支是命令表守卫（test-commands.js）的实现锚点。
+      return { cmd, argv: args };
     default:
       usage();
   }

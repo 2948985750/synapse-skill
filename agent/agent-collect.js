@@ -182,6 +182,27 @@ function resolveExtDir() {
 // 认证通过且 role=extension 即证明 SW 活着（无需任何桥在运行）。
 // 返回 { promise: {detected, ms, port?, error?}, portReady }。
 async function main(argv = process.argv.slice(2)) {
+  // 统一 CLI 子命令：discover / actions 直接委托 runner 程序（各自有自己的参数
+  // 白名单与退出码语义）。必须在 parseArgs 之前拦截——全局 parseArgs 会吃掉
+  // --param/--dry/--session/--force/--max 等旗标（桥命令语义），与 runner 的语义冲突。
+  const [head, ...rawRest] = argv;
+  if (head === "discover" || head === "actions") {
+    if (head === "discover") {
+      const { main: runDiscover } = require("../runner/discover");
+      const code = await runDiscover(rawRest).catch((e) => {
+        console.error("[discover] 失败: " + (e && e.message ? e.message : e));
+        return 1;
+      });
+      process.exitCode = code || 0;
+    } else {
+      const { main: runActions } = require("../runner/actions");
+      await runActions(rawRest).catch((e) => {
+        console.error("[action] 失败: " + (e && e.message ? e.message : e));
+        process.exitCode = 1;
+      });
+    }
+    return;
+  }
   const opts = parseArgs(argv);
   if (!opts.rest.length) usage();
   const command = buildCmd(opts.rest, opts);
@@ -189,7 +210,7 @@ async function main(argv = process.argv.slice(2)) {
   opts.transientClient = !opts.clientId;
   opts.clientId = opts.clientId || "cli-" + crypto.randomUUID();
   if (command.cmd === "config") {
-    // 纯本地：查看/指定数据目录，不连桥、不需要令牌。
+    // 纯本地：查看/指定数据目录，无需扩展连入、不需要令牌。
     const paths = require("./paths");
     const cfgArgs = command.args || {};
     if (cfgArgs.action === "set") {
