@@ -123,7 +123,7 @@ function resolveProfilesRoot(config = readConfig()) {
 const PROFILES_ROOT = resolveProfilesRoot().value;
 
 // 包含性判定：p 是否在 root 目录内（含等于 root）。跨盘符/绝对路径逃逸都算不在内。
-// 位置约定的执法器：所有路径覆盖旗标只能落在对应锚内（README「路径配置」），
+// 位置约定的执法器：所有路径覆盖旗标只能落在对应锚内（SKILL.md「怎么用」的产物位置），
 // agent 不能用临时旗标把数据写到约定之外——整体重定位走 config/WB_DATA_DIR/SYNAPSE_OUTPUT_DIR。
 function isInside(root, p) {
   const rel = path.relative(path.resolve(root), path.resolve(p));

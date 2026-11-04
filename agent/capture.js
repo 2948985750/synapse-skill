@@ -39,17 +39,22 @@ async function buildCaptureSessionResult(sendCmd, s, events, opts, bodyStore) {
     }
   }
 
-  // 过滤（与 doCapture 一致：默认只留 xhr/fetch 或 json；--all 全留；--filter 正则再筛）
+  // 过滤（与 doCapture 一致：默认只留 xhr/fetch 或文本类数据体，二进制 MIME
+  // 先杀——站点也用 XHR 拉图片/字体/protobuf（WhatsApp emoji 雪碧、douyin
+  // x-protobuf），取它们的体只会浪费 CDP 调用并产生垃圾数据；--all 全留；
+  // --filter 正则再筛）。BINARY_MIME 与 runner/discover.js 的 pruneCapture 同源。
+  const BINARY_MIME =
+    /^(image|font|audio|video)\/|application\/(octet-stream|zip|gzip|pdf|wasm|protobuf|x-protobuf|vnd\.ms-)/i;
   let cands = [...reqs.values()].filter(
     (c) => c.url && c.status && c.status < 500,
   );
   if (!opts.all) {
-    cands = cands.filter(
-      (c) =>
-        String(c.type).toLowerCase() === "xhr" ||
-        String(c.type).toLowerCase() === "fetch" ||
-        /json/i.test(c.mimeType || ""),
-    );
+    cands = cands.filter((c) => {
+      const mime = String(c.mimeType || "");
+      if (BINARY_MIME.test(mime)) return false;
+      const t = String(c.type).toLowerCase();
+      return t === "xhr" || t === "fetch" || /json/i.test(mime);
+    });
   }
   if (opts.filter) {
     let re;
@@ -234,12 +239,18 @@ async function doCaptureMany(sendCmd, pairs, opts, eventsByCapture) {
         filterRe = new RegExp(opts.filter, "i");
       } catch (_) {}
     }
-    // 只有"可能被保留"的响应才值得 eager 取体（与结果整形阶段的过滤条件一致）。
-    // 没有 requestWillBeSent 上下文的 loadingFinished 一律不取，留给兜底路径。
+    // 只有"可能被保留"的响应才值得 eager 取体（与结果整形阶段对齐：二进制按
+    // URL 后缀先挡——mime 在 responseReceived 才有，此处预检拿不到，漏网的由
+    // 整形侧 BINARY_MIME 再杀，bodyStore 16MB 上限兜底）。JSON 的 document 类
+    // 响应提前 eager：它们的体只有窗口内取得到（T-30），关窗后兜底必失败。
+    const BINARY_URL =
+      /\.(png|jpe?g|gif|webp|avif|svg|ico|woff2?|ttf|otf|eot|css|js|mjs|map|html?|wasm|mp4|mp3|webm|pdf|zip|gz|apk)(\?|#|$)/i;
     const wanted = (info) => {
       if (!info) return false;
       if (opts.all) return true;
+      if (BINARY_URL.test(info.url || "")) return false;
       if (info.type === "xhr" || info.type === "fetch") return true;
+      if (/json/i.test(info.url || "")) return true;
       return !!(filterRe && filterRe.test(info.url));
     };
     const t0 = Date.now();

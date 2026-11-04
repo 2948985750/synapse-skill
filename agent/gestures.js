@@ -8,7 +8,7 @@
 // 逐字一致（枚举顺序相同，snapshot 索引才对齐）。test/test-gestures.js 有守卫。
 //
 // 页内事件都是合成事件（isTrusted:false，信任级别同 click-el）；只认受信输入的
-// 站点用 `cdp Input.dispatch*` 配方兜底（配方在 SKILL.md「机制说明」的「交互原语」节）。
+// 站点用 `cdp Input.dispatch*` 配方兜底（配方要点见 SKILL.md「红线与排障」的已知坑）。
 
 // 与扩展仓 page-actions.js 保持逐字一致（collector 镜像，勿手改）。
 const EL_CANDIDATE_SEL =
