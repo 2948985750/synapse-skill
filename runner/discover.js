@@ -7,21 +7,26 @@
 // 本身：快照（snapshot 段）+ 站点知识，纯数据、无采集代码。没有独立的"材料包"，
 // 元素快照与响应体都直接写进画像。
 //
-//   run —— bounded same-origin crawl: per page take snapshot / link list /
-//          structure probe / XHR capture (bodies included), then write ONE
-//          profile draft at <PROFILES_ROOT>/draft/<domain>.json with the
-//          snapshot embedded. The agent fills the knowledge fields from the
-//          snapshot; human review promotes the draft to a formal profile.
+//   run —— open the entry page ONCE and take a single-page rich snapshot:
+//          all interactive elements (incl. SPA jump containers: cursor:pointer /
+//          onclick / role=link divs, not just <a href>) + structure probe + XHR
+//          capture (bodies included), then write ONE profile draft at
+//          <PROFILES_ROOT>/draft/<domain>.json with the snapshot embedded.
+//          The program does NOT auto-follow links to crawl further pages —
+//          page-to-page jumps / routes are discovered by the LLM during
+//          interactive exploration (click → observe location change → summarize),
+//          which also fills the knowledge fields; human review promotes the
+//          draft to a formal profile.
 //
 // Safety is enforced here, not left to model compliance:
-//   - same-origin only (cross-origin links recorded, never visited);
+//   - same-origin only (cross-origin redirect recorded, never visited);
 //   - danger keywords (删除/支付/logout/checkout/…) recorded, never clicked;
-//   - forms are never auto-submitted in run mode;
-//   - hard budget: depth ≤ N, pages ≤ N, wall clock ≤ N, ≥ gap between navigations;
+//   - forms are never auto-submitted;
+//   - single entry page only: no crawl budget, the agent drives navigation;
 //   - no location flags: the program decides where to write; promotion to
 //     formal profiles is an explicit human step.
 //
-// Exit codes: 0 ok (budget stop is normal, see summary), 1 usage/exec.
+// Exit codes: 0 ok, 1 usage/exec.
 const fs = require("fs");
 const path = require("path");
 
@@ -122,31 +127,6 @@ function normalizeUrl(u) {
   }
 }
 
-function sameOriginGuard(u, origin) {
-  try {
-    const url = new URL(String(u));
-    if (url.origin !== origin) return { ok: false, reason: "cross-origin" };
-    return { ok: true };
-  } catch (_) {
-    return { ok: false, reason: "invalid-url" };
-  }
-}
-
-// 登录/注册墙：只记录不进入（登录态不该被 discover 改写）。
-const SKIP_URL_RE =
-  /\/(login|signin|sign-in|signup|sign-up|register|logout)([/?#]|$)/i;
-// 静态资源不是页面。
-const FILE_URL_RE =
-  /\.(pdf|jpe?g|png|gif|svg|webp|ico|css|js|zip|rar|7z|gz|mp4|m4a|mp3|wav|docx?|xlsx?|pptx?|csv|exe|dmg|apk|msi)([?#]|$)/i;
-
-const pathDepth = (u) => {
-  try {
-    return new URL(u).pathname.split("/").filter(Boolean).length;
-  } catch (_) {
-    return 99;
-  }
-};
-
 // 按首段路径聚类，给 agent 一个"路由家族"的粗提示（/jobs/1 与 /jobs/2 同族）。
 // 真正的 URL 模板归纳是判断活，交给 agent，这里不做。
 function clusterByPathPrefix(urls, segs = 1) {
@@ -162,63 +142,36 @@ function clusterByPathPrefix(urls, segs = 1) {
   return out;
 }
 
-// 从一页的链接里挑 BFS 入队项：同源、非登录墙、非资源、未见过，
-// 浅路径优先（导航层比深层详情页更像"功能"）。纯函数，便于测试。
-function pickEnqueueLinks(
-  links,
-  { origin, maxLinks, visited, depth, maxDepth },
-) {
-  if (depth + 1 > maxDepth) return { enqueued: [], filtered: 0 };
-  const seen = new Set();
-  const cands = [];
-  let filtered = 0;
-  for (const l of links || []) {
-    const norm = normalizeUrl(l && l.href);
-    if (!norm) continue;
-    if (!sameOriginGuard(norm, origin).ok) {
-      filtered++;
-      continue;
+// 紧凑目录段（纯数据）：draft 的"各段规模"。LLM 读 draft 的第一步只看这段
+// （~10 行）就知道盘子多大，再按需开 snapshot/capture。只承载规模，不承载
+// 业务信号（接口家底/危险词等仍由 LLM 进 snapshot 段自己看）。
+function buildDigest(snapshot) {
+  const pages = (snapshot && snapshot.pages) || [];
+  let interactive = 0;
+  let clickables = 0;
+  let forms = 0;
+  let lists = 0;
+  let bodiesReturned = 0;
+  let bodyBytes = 0;
+  for (const p of pages) {
+    interactive += (p.outline || []).length;
+    clickables += (p.clickables || []).length;
+    const st = p.structure || {};
+    forms += (st.forms || []).length;
+    lists += (st.lists || []).length;
+    for (const r of (p.capture && p.capture.requests) || []) {
+      bodiesReturned++;
+      bodyBytes += String(r.body || "").length;
     }
-    if (SKIP_URL_RE.test(norm)) {
-      filtered++;
-      continue;
-    }
-    if (FILE_URL_RE.test(norm)) {
-      filtered++;
-      continue;
-    }
-    if (visited.has(norm) || seen.has(norm)) continue;
-    seen.add(norm);
-    cands.push({ url: norm, depth: depth + 1, text: String(l.text || "") });
   }
-  cands.sort((a, b) => pathDepth(a.url) - pathDepth(b.url));
-  return { enqueued: cands.slice(0, maxLinks), filtered };
-}
-
-function createBudget(opts = {}) {
-  const maxPages = Number(opts.maxPages) || 20;
-  const maxDurationMs = Number(opts.maxDurationMs) || 600000;
-  const minGapMs = Number(opts.minGapMs) || 2000;
-  const t0 = Date.now();
-  let pages = 0;
-  let lastAction = 0;
   return {
-    maxPages,
-    maxDurationMs,
-    minGapMs,
-    pages: () => pages,
-    elapsedMs: () => Date.now() - t0,
-    outOfPages: () => pages >= maxPages,
-    outOfTime: () => Date.now() - t0 >= maxDurationMs,
-    spendPage: () => ++pages,
-    markAction: () => {
-      lastAction = Date.now();
-    },
-    async waitGap() {
-      const wait = minGapMs - (Date.now() - lastAction);
-      if (wait > 0) await sleep(wait);
-      this.markAction();
-    },
+    pages: pages.length,
+    interactive,
+    clickables,
+    forms,
+    lists,
+    responseBodies: { returned: bodiesReturned, bytesKb: Math.round(bodyBytes / 1024) },
+    snapshotKb: Math.round(JSON.stringify(snapshot || {}).length / 1024),
   };
 }
 
@@ -228,8 +181,9 @@ function buildDraftSkeleton({ domain, entry, visited, observations, snapshot }) 
     schemaVersion: 3,
     domain,
     siteName: domain,
-    goal: "（draft）discover.js 站点发现骨架：采集快照（snapshot，仅可交互元素 + 站点框架归并）与路由/入口/limits 已填，知识字段（fieldMap/params/pageNotes/antiScrape）待 agent 依 snapshot 补全",
+    goal: "（draft）discover.js 站点发现骨架：采集快照（snapshot，仅可交互元素 + 站点框架归并）与路由/入口/limits 已填，知识字段（fieldMap/params/pageNotes/antiScrape）待 agent 依 snapshot 补全。先读 digest 段再按需开 snapshot。",
     status: "draft",
+    digest: buildDigest(snapshot),
     createdAt: today,
     updatedAt: today,
     access: {
@@ -258,13 +212,6 @@ function buildDraftSkeleton({ domain, entry, visited, observations, snapshot }) 
 }
 
 // ---------------- 页内探针（只读，不点击、不提交） ----------------
-
-const LINKS_PROBE_JS =
-  "(function(){try{var out=[],seen={},as=document.querySelectorAll('a[href]');" +
-  "for(var i=0;i<as.length&&out.length<300;i++){var a=as[i],h=a.href;" +
-  "if(!h||h.indexOf('javascript:')===0||seen[h])continue;seen[h]=1;" +
-  "var t=(a.innerText||a.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim().slice(0,80);" +
-  "out.push({href:h,text:t})}return out}catch(e){return[]}})()";
 
 // 重复结构 = 列表容器的机械线索（父节点下 N 个同签名子元素）。误报多，
 // 只作为交给 agent 的线索，不直接进画像知识。
@@ -334,9 +281,13 @@ const OUTLINE_PROBE_JS =
 
 // 骨架的 node 侧整形：同签名+同文本的合并计次（导航项"首页"×3 是一个信息不是三条）、
 // 截断限量。规则放 node 侧是为了可单测；页内探针只负责采集。
-function shapeOutline(items, { max = 200 } = {}) {
+// 双上限（token 经济）：可交互条目信息密度高，放宽到 200；非交互的纯文本骨架
+// 是给 LLM 的"页面大意"，60 条足够——token 大头在后者。
+function shapeOutline(items, { max = 200, maxText = 60 } = {}) {
   const seen = new Map();
   const out = [];
+  let interactiveOut = 0;
+  let textOut = 0;
   for (const it of Array.isArray(items) ? items : []) {
     if (!it || typeof it !== "object") continue;
     const text = String(it.text || "")
@@ -358,9 +309,16 @@ function shapeOutline(items, { max = 200 } = {}) {
     if (it.role) item.role = String(it.role).slice(0, 30);
     if (it.href) item.href = String(it.href);
     if (it.cursorPointer) item.cursorPointer = true;
+    // 双上限在"首次出现"时记账（计次合并不再占用额度）
+    if (item.interactive) {
+      if (interactiveOut >= max) continue;
+      interactiveOut++;
+    } else {
+      if (textOut >= maxText) continue;
+      textOut++;
+    }
     seen.set(key, item);
     out.push(item);
-    if (out.length >= max) break;
   }
   return out;
 }
@@ -411,13 +369,44 @@ function pruneStructure(structure, { maxLists = 8 } = {}) {
 // 一律丢弃——它们对采集知识无价值，还会把画像撑到 MB 级。
 // 例外：Content-Type 是 JSON 的（即便 resourceType 标成 document/other）仍保留。
 // 注意：站点常把图片/字体也用 XHR 拉（如 WhatsApp 的 emoji 雪碧图 type=XHR, mime=image/webp），
-// 所以先按 MIME 判二进制，再看 resourceType。
-function pruneCapture(capture, origin) {
+// 所以先按 MIME 判二进制，再看 resourceType。BINARY_MIME 与 agent/capture.js 的整形侧名单保持一致
+// （那边同时拦二进制取体，这里兜底）。
+// token 经济（默认预算 256KB）：重排为"JSON-mime 优先、体积小者优先"（上游按体积降序取 40 条，
+// 专留最大的——对着 token 浪费）；超预算的 JSON 体换掉原文，只留 shape（顶层 keys +
+// 首条记录形状）+ 前 512B 样例 + bodyOmitted。程序侧（actions 快路径）不读 capture 段，
+// 这里的瘦身不影响执行。
+const isJsonBody = (r) =>
+  /json/i.test(String((r && r.mimeType) || "")) ||
+  /json/i.test(String((r && r.url) || ""));
+
+// JSON 体的"形状"摘要：顶层 keys 或数组首条记录的 keys，值只记类型（叶子）或条数。
+// 让 LLM 知道"接口返回什么结构"而不必载入原文。
+function jsonShapeOf(v) {
+  const typeOf = (o) =>
+    o === null
+      ? "null"
+      : Array.isArray(o)
+        ? "array(" + o.length + ")"
+        : o && typeof o === "object"
+          ? "object"
+          : typeof o;
+  const keysOf = (o) => {
+    const m = {};
+    for (const k of Object.keys(o).slice(0, 24)) m[k] = typeOf(o[k]);
+    return m;
+  };
+  if (Array.isArray(v))
+    return { root: "array(" + v.length + ")", record: v.length ? keysOf(v[0] || {}) : {} };
+  if (v && typeof v === "object") return { root: "object", keys: keysOf(v) };
+  return { root: typeOf(v) };
+}
+
+function pruneCapture(capture, { bodyBudgetKb = 256 } = {}) {
   if (!capture || !Array.isArray(capture.requests)) return capture;
   const STATIC_EXT =
     /\.(png|jpe?g|gif|webp|avif|svg|ico|woff2?|ttf|otf|eot|css|js|mjs|map|html?|wasm|mp4|mp3|webm|pdf)(\?|#|$)/i;
   const BINARY_MIME =
-    /^(image|font|audio|video)\/|application\/(octet-stream|zip|gzip|pdf|wasm|vnd\.ms-)/i;
+    /^(image|font|audio|video)\/|application\/(octet-stream|zip|gzip|pdf|wasm|protobuf|x-protobuf|vnd\.ms-)/i;
   const requests = capture.requests.filter((r) => {
     const u = String((r && r.url) || "");
     const t = String((r && r.type) || "").toLowerCase();
@@ -428,7 +417,35 @@ function pruneCapture(capture, origin) {
     if (/json/i.test(u) && !STATIC_EXT.test(u)) return true;
     return false;
   });
-  return { ...capture, requests };
+  // 稳定排序：JSON 先（信息密度最高），同组内体积小者优先（小体是完整数据，
+  // 大体多半是列表/雪碧，shape 就够）
+  requests.sort((a, b) => {
+    const aj = isJsonBody(a) ? 0 : 1;
+    const bj = isJsonBody(b) ? 0 : 1;
+    if (aj !== bj) return aj - bj;
+    return String(a.body || "").length - String(b.body || "").length;
+  });
+  // 总预算：超出的 JSON 体降级为 shape + 512B 样例（非 JSON 无 shape 可提，
+  // 直接截到 512B 占样）
+  const budget = bodyBudgetKb * 1024;
+  let used = 0;
+  for (const r of requests) {
+    const body = String(r.body || "");
+    if (!body) continue;
+    if (used + body.length <= budget) {
+      used += body.length;
+      continue;
+    }
+    if (/json/i.test(String(r.mimeType || ""))) {
+      try {
+        r.shape = jsonShapeOf(JSON.parse(body));
+      } catch (_) {}
+    }
+    r.body = body.slice(0, 512);
+    r.bodyOmitted = true;
+    used += 512;
+  }
+  return { ...capture, requests, bytesKb: Math.round((used / 1024) * 10) / 10 };
 }
 
 // 采集结果 → 画像 snapshot：outline 只留可交互元素（interactive:true），
@@ -436,12 +453,18 @@ function pruneCapture(capture, origin) {
 // （导航/侧栏/页脚），归并进 chrome 只存一份。links/controls 是采集中间量，不入画像。
 function buildSnapshot(
   pages,
-  { origin, skipped = [], minPages, maxOutline = 200 } = {},
+  { skipped = [], minPages, maxOutline = 200 } = {},
 ) {
   // 阈值按页面数自适应：至少 3 页、且覆盖半数页面。低于半数的重复元素很可能是
   // 页面级操作（如详情页的 Apply now、同族页共享的 tab），归并会把页面交互面搬空。
   const chromeMin = Math.max(3, Math.ceil((pages.length || 1) / 2));
-  const threshold = Number.isFinite(minPages) ? minPages : chromeMin;
+  // "跨多页重复 = 站点框架"的判定对单页采集不成立：同页三条同卡片是内容不是
+  // 框架，归并会把页面交互面搬空。
+  const threshold = Number.isFinite(minPages)
+    ? minPages
+    : (pages.length || 0) >= 2
+      ? chromeMin
+      : Infinity;
   const counts = new Map();
   const keyOf = (sig, text) => String(sig || "?") + "|" + String(text || "");
   const bump = (kind, it) => {
@@ -479,17 +502,15 @@ function buildSnapshot(
   }
   const pruned = pages.map((pg) => ({
     url: pg.url,
-    depth: pg.depth,
     requestedAt: pg.requestedAt,
     title: pg.title,
     finalUrl: pg.finalUrl,
     loginWall: pg.loginWall,
-    enqueued: pg.enqueued,
     structure: pruneStructure(pg.structure),
     dangerous: pg.dangerous,
     outline: (pg.outline || []).filter((it) => it.interactive && !isChrome(it)).slice(0, maxOutline),
     clickables: (pg.clickables || []).filter((c) => !isChrome(c)),
-    capture: pruneCapture(pg.capture, origin),
+    capture: pruneCapture(pg.capture),
   }));
   return {
     capturedAt: new Date().toISOString(),
@@ -505,26 +526,19 @@ function buildSnapshot(
 // 不静默忽略，agent 误以为能指定位置时必须立刻失败。
 const ALLOWED_FLAGS = new Set([
   "--url",
-  "--max-pages",
-  "--depth",
-  "--duration-ms",
-  "--gap-ms",
   "--dwell-ms",
   "--settle-ms",
-  "--max-links",
   "--session",
   "--force",
   "--keep-tab",
-  "--plan",
 ]);
 
 async function discoverRun(argv, deps = {}) {
   const urlText = getOpt(argv, "--url");
   if (!urlText) {
     console.error(
-      "用法: discover.js --url <入口> [--max-pages 20] [--depth 2] [--duration-ms 600000]\n" +
-        "      [--gap-ms 2000] [--dwell-ms 4000] [--max-links 12] [--session sid]\n" +
-        "      [--force] [--keep-tab] [--plan]",
+      "用法: discover.js --url <入口> [--dwell-ms 4000] [--settle-ms 2500] [--session sid]\n" +
+        "      [--force] [--keep-tab]",
     );
     return 1;
   }
@@ -548,56 +562,16 @@ async function discoverRun(argv, deps = {}) {
   const entryOrigin = new URL(entry).origin;
   const domain = new URL(entry).hostname.replace(/^www\./, "");
 
-  const budget = createBudget({
-    maxPages: getOpt(argv, "--max-pages", 20),
-    maxDurationMs: getOpt(argv, "--duration-ms", 600000),
-    minGapMs: getOpt(argv, "--gap-ms", 2000),
-  });
-  const depth = Number(getOpt(argv, "--depth", 2));
   const dwellMs = Number(getOpt(argv, "--dwell-ms", 4000));
   const settleMs = Number(getOpt(argv, "--settle-ms", 2500));
-  const maxLinks = Number(getOpt(argv, "--max-links", 12));
   const session = getOpt(argv, "--session", "");
   const keepTab = argv.includes("--keep-tab");
   const force = argv.includes("--force");
-  const planOnly = argv.includes("--plan");
 
   // 位置完全由程序决定：没有位置旗标，agent 无权指定保存位置。
   // 采集结果直接写进画像（快照在 snapshot 段）——不存在独立的"材料包"。
-  // 整根重定位只能走操作者层配置（config set data-root/profile-root 或 WB_* 环境变量）。
   const draftPath = path.join(PROFILES_ROOT, "draft", domain + ".json");
 
-  if (planOnly) {
-    // dry 计划：不起浏览器，路由枚举只能靠真跑得出。
-    console.log(
-      JSON.stringify(
-        {
-          mode: "plan",
-          entry,
-          domain,
-          budget: {
-            maxPages: budget.maxPages,
-            maxDepth: depth,
-            maxDurationMs: budget.maxDurationMs,
-            minGapMs: budget.minGapMs,
-          },
-          guards: [
-            "same-origin",
-            "danger-keyword-no-click",
-            "no-form-submit",
-            "auth-wall-record-only",
-          ],
-          outputs: {
-            profile: draftPath,
-          },
-          note: "plan 不含路由枚举；--plan 只核对预算与守卫配置",
-        },
-        null,
-        2,
-      ),
-    );
-    return 0;
-  }
   if (fs.existsSync(draftPath) && !force) {
     console.error("[discover] draft 已存在（--force 覆盖）: " + draftPath);
     return 1;
@@ -610,115 +584,79 @@ async function discoverRun(argv, deps = {}) {
   const browser = await connect({
     ...(session ? { session } : {}),
     durationMs: dwellMs,
-    bodyMaxKb: 100,
+    // token 经济：单条响应体 16KB 上限（draft 是给 LLM 读的，接口"长什么样"
+    // 16KB 足够看结构，全量原文是浪费）；超预算条目由 pruneCapture 再降级 shape。
+    bodyMaxKb: 16,
     triggerJs: SCROLL_TRIGGER_JS,
   });
   const log = deps.log || ((m) => console.error("[discover] " + m));
   let tabId = null;
-  const visited = new Set();
-  const pages = [];
   const skipped = [];
-  const queue = [{ url: entry, depth: 0 }];
 
   try {
-    while (queue.length) {
-      if (budget.outOfTime() || budget.outOfPages()) {
-        for (const rest of queue)
-          skipped.push({
-            url: rest.url,
-            reason: budget.outOfTime() ? "budget-time" : "budget-pages",
-          });
-        queue.length = 0;
-        break;
-      }
-      const item = queue.shift();
-      const norm = normalizeUrl(item.url);
-      if (!norm || visited.has(norm)) continue;
-      const guard = sameOriginGuard(norm, entryOrigin);
-      if (!guard.ok) {
-        skipped.push({ url: norm, reason: guard.reason });
-        continue;
-      }
-      if (SKIP_URL_RE.test(norm)) {
-        skipped.push({ url: norm, reason: "auth" });
-        continue;
-      }
-      if (FILE_URL_RE.test(norm)) {
-        skipped.push({ url: norm, reason: "asset" });
-        continue;
-      }
-      visited.add(norm);
-      await budget.waitGap();
+    // 单页富快照：程序只打开入口页，采集全部可交互元素（含 SPA 跳转容器）+ 响应体。
+    // 不再跟 <a> 自动翻页——每个元素"点了跳到哪页/发生什么行为"由 LLM 交互时观测
+    // 并总结（agent 用 click-el 触发、观察 location 变化、记进画像知识）。
+    const opened = await browser.open(entry, { waitMs: 8000 });
+    tabId = opened.tabId;
+    await sleep(settleMs);
 
-      // 导航：第一页 open 建标签，之后复用同一标签 navigate（页面数有预算，不攒标签）。
-      try {
-        if (tabId == null) {
-          const opened = await browser.open(norm, { waitMs: 8000 });
-          tabId = opened.tabId;
-        } else {
-          await browser.call("navigate", { tabId, url: norm, waitMs: 8000 });
-        }
-      } catch (e) {
-        skipped.push({ url: norm, reason: "navigate-failed: " + e.message });
-        continue;
-      }
-      await sleep(settleMs);
-      budget.spendPage();
+    const page = {
+      url: entry,
+      requestedAt: new Date().toISOString(),
+      title: "",
+      finalUrl: "",
+      loginWall: false,
+      structure: null,
+      dangerous: [],
+      outline: [],
+      clickables: [],
+      capture: null,
+    };
 
-      const page = {
-        url: norm,
-        depth: item.depth,
-        requestedAt: new Date().toISOString(),
-        title: "",
-        finalUrl: "",
-        loginWall: false,
-        enqueued: [],
-        structure: null,
-        dangerous: [],
-        outline: [],
-        clickables: [],
-        capture: null,
-      };
+    // 页内探针走 returnByValue 返回：对象就是对象，location.href/document.title
+    // 是裸字符串。早先统一 JSON.parse 被 catch 吞掉，finalUrl/title 恒空，
+    // 下面的跨源判断整段成了死代码。
+    const runValue = async (js) => {
+      const raw = await browser.run(tabId, js);
+      const value = raw && raw.result ? raw.result.value : raw;
+      return value;
+    };
+    try {
+      page.finalUrl = normalizeUrl(await runValue("location.href")) || "";
+      page.title = String((await runValue("document.title")) || "");
+    } catch (_) {}
+    let crossOrigin = false;
+    if (page.finalUrl && new URL(page.finalUrl).origin !== entryOrigin) {
+      // 跳出同源（SSO 登录跳转等）：只记录、不进入——异源页的探针/快照/响应体
+      // 不进本域画像（LLM 会把异源数据当成本域知识）。
+      crossOrigin = true;
+      page.loginWall = true;
+      skipped.push({ url: entry, reason: "redirect-out: " + page.finalUrl });
+    }
 
-      const runValue = async (js) => {
-        const raw = await browser.run(tabId, js);
-        const value = raw && raw.result ? raw.result.value : raw;
-        return typeof value === "string" ? JSON.parse(value) : value;
-      };
-      try {
-        page.finalUrl = normalizeUrl(await runValue("location.href")) || "";
-        page.title = String((await runValue("document.title")) || "");
-      } catch (_) {}
-      if (page.finalUrl && new URL(page.finalUrl).origin !== entryOrigin) {
-        // 跳出同源（SSO 登录跳转等）：只记录，不采不进。
-        page.loginWall = true;
-        pages.push(page);
-        skipped.push({ url: norm, reason: "redirect-out: " + page.finalUrl });
-        continue;
-      }
-
-      let links = [];
-      try {
-        links = (await runValue(LINKS_PROBE_JS)) || [];
-      } catch (e) {
-        log("links probe failed: " + e.message);
-      }
-      try {
-        page.structure = await runValue(STRUCTURE_PROBE_JS);
-      } catch (e) {
-        log("structure probe failed: " + e.message);
-      }
-      try {
+    try {
+      if (!crossOrigin) page.structure = await runValue(STRUCTURE_PROBE_JS);
+    } catch (e) {
+      log("structure probe failed: " + e.message);
+    }
+    try {
+      if (!crossOrigin) {
         const shaped = await runValue(OUTLINE_PROBE_JS);
         page.outline = shapeOutline(shaped && shaped.outline);
         page.clickables = shapeClickables(shaped && shaped.clickables);
-      } catch (e) {
-        page.outline = [];
-        page.clickables = [];
-        log("outline probe failed: " + e.message);
       }
-      page.loginWall = !!(page.structure && page.structure.passwordFields > 0);
+    } catch (e) {
+      page.outline = [];
+      page.clickables = [];
+      log("outline probe failed: " + e.message);
+    }
+    if (!crossOrigin)
+      page.loginWall =
+        page.loginWall ||
+        !!(page.structure && page.structure.passwordFields > 0);
 
+    if (!crossOrigin) {
       try {
         const snap = await browser.snapshot(tabId, { max: 60 });
         // snapshot 返回 {url,ts,total,count,items}，不是裸数组。
@@ -728,7 +666,7 @@ async function discoverRun(argv, deps = {}) {
           const danger = isDangerousLabel(label);
           if (danger)
             page.dangerous.push({
-              i: el.i,
+              where: "snapshot",
               tag: el.tag,
               role: el.role || "",
               label,
@@ -738,7 +676,30 @@ async function discoverRun(argv, deps = {}) {
       } catch (e) {
         log("snapshot failed: " + e.message);
       }
+    }
 
+    // 危险词覆盖整页大纲/SPA 可点容器，不只快照前 60 条。带 where 标明出处；
+    // 不存 snapshot 的 i 编号（它是当次会话的索引空间，draft 里没有那张表，
+    // 实跑时编号也会漂移，只靠 tag/role/sig/label 定位）。
+    const seenDanger = new Set();
+    for (const it of [...(page.outline || []), ...(page.clickables || [])]) {
+      const text = String(it.text || "").replace(/\s+/g, " ").slice(0, 60);
+      const danger = isDangerousLabel(text);
+      if (!danger) continue;
+      const key = String(it.sig || "?") + "|" + text;
+      if (seenDanger.has(key)) continue;
+      seenDanger.add(key);
+      const sig = String(it.sig || "");
+      page.dangerous.push({
+        where: "outline",
+        sig,
+        tag: sig.split(/[.#]/)[0],
+        label: text,
+        matched: danger,
+      });
+    }
+
+    if (!crossOrigin) {
       try {
         const cap = await browser.call("capture", { tabId, action: "wait" });
         // 响应体随页进画像 snapshot（原独立 captures/ 文件取消）。
@@ -751,67 +712,54 @@ async function discoverRun(argv, deps = {}) {
         page.capture = { error: e.message };
         log("capture failed: " + e.message);
       }
-
-      const picked = pickEnqueueLinks(links, {
-        origin: entryOrigin,
-        maxLinks,
-        visited,
-        depth: item.depth,
-        maxDepth: depth,
-      });
-      page.enqueued = picked.enqueued.map((e) => e.url);
-      queue.push(...picked.enqueued);
-
-      pages.push(page);
-      log(
-        `page ${pages.length}: ${norm} (depth ${item.depth}, links ${links.length}, queued ${picked.enqueued.length})`,
-      );
     }
 
     const observations = {
-      loginRequired:
-        pages.some((p) => p.loginWall) ||
-        skipped.some((s) => s.reason === "auth"),
-      loginNote: pages
-        .filter((p) => p.loginWall)
-        .map((p) => p.url)
-        .slice(0, 5)
-        .join(", "),
+      loginRequired: page.loginWall || skipped.some((s) => s.reason === "auth"),
+      loginNote: page.loginWall ? entry : "",
       limits: {
-        pagesVisited: pages.length,
-        routes: clusterByPathPrefix(pages.map((p) => p.url)),
-        navGapMs: budget.minGapMs,
+        pagesVisited: 1,
+        routes: clusterByPathPrefix([page.finalUrl || entry]),
+        note: "单页富快照；页间跳转/路由由 LLM 交互观测补全（discover 不再自动跟链接）",
       },
     };
-    const snapshot = buildSnapshot(pages, { origin: entryOrigin, skipped });
+    const snapshot = buildSnapshot([page], { skipped });
     const draft = buildDraftSkeleton({
       domain,
       entry,
-      visited: [...visited],
+      visited: [entry],
       observations,
       snapshot,
     });
     fs.mkdirSync(path.dirname(draftPath), { recursive: true });
-    // draft 是纯数据画像（.json）：采集快照在 snapshot 段，知识字段由 agent 依
-    // snapshot 补全；没有任何代码。
-    fs.writeFileSync(draftPath, JSON.stringify(draft, null, 2) + "\n", "utf8");
+    // draft 是纯数据画像（.json）：采集快照在 snapshot 段，知识字段（fieldMap/
+    // params/pageNotes/antiScrape）由 agent 依 snapshot 补全；没有任何代码。
+    // 原子写（同目录 tmp + rename，与 agent/lib/json-store 同纪律）：半写坏的
+    // draft 会让下次"已存在拒绝"卡在损坏文件上。
+    const tmpPath = draftPath + "." + process.pid + ".tmp";
+    fs.writeFileSync(tmpPath, JSON.stringify(draft, null, 2) + "\n", "utf8");
+    fs.renameSync(tmpPath, draftPath);
 
+    const bodyCount =
+      page.capture && page.capture.requests ? page.capture.requests.length : 0;
+    log(
+      `page: ${page.finalUrl || entry}（可交互 ${
+        page.outline.length + page.clickables.length
+      }，响应体 ${bodyCount}）`,
+    );
     console.log(
       JSON.stringify({
         ok: true,
         domain,
-        pages: pages.length,
-        visited: visited.size,
-        skipped: skipped.length,
+        entry,
+        finalUrl: page.finalUrl || entry,
+        loginWall: page.loginWall,
         snapshot: {
-          chrome: (snapshot.chrome.outline || []).length + (snapshot.chrome.clickables || []).length,
-          interactivePerPage: Math.round(
-            snapshot.pages.reduce((n, p) => n + (p.outline || []).length, 0) / (snapshot.pages.length || 1),
-          ),
+          interactive: page.outline.length + page.clickables.length,
+          responseBodies: bodyCount,
         },
-        budget: { elapsedMs: budget.elapsedMs(), maxPages: budget.maxPages },
         draft: draftPath,
-        note: "采集快照已写入 draft.snapshot（仅可交互元素；跨页框架归并进 chrome）；知识字段（fieldMap/params/pageNotes/antiScrape）由 agent 依 snapshot 补全（见 README「画像生产」）",
+        note: "单页富快照（含 SPA 跳转容器）已写入 draft.snapshot；页间跳转与路由由 LLM 交互观测补全，知识字段（fieldMap/params/pageNotes/antiScrape）由 agent 依 snapshot 补全（见 SKILL.md「画像生产」）",
       }),
     );
     return 0;
@@ -845,20 +793,15 @@ if (require.main === module) {
 module.exports = {
   isDangerousLabel,
   normalizeUrl,
-  sameOriginGuard,
-  SKIP_URL_RE,
-  FILE_URL_RE,
   clusterByPathPrefix,
-  pickEnqueueLinks,
-  createBudget,
   buildDraftSkeleton,
   buildSnapshot,
   pruneStructure,
   pruneCapture,
+  jsonShapeOf,
   shapeOutline,
   shapeClickables,
   // 页内探针源码（审计/复现用：注入浏览器执行）
-  LINKS_PROBE_JS,
   STRUCTURE_PROBE_JS,
   OUTLINE_PROBE_JS,
   main,

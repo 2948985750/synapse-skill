@@ -1,18 +1,13 @@
 "use strict";
 // discover.js 纯函数单测（浏览器无关）。真浏览器的发现流程归 live 测试管，
-// 这里锁住的是守卫逻辑：危险词、同源、URL 归一、入队挑选、预算、draft 骨架。
+// 这里锁住的是：危险词、URL 归一、路由聚类、draft 骨架、探针整形、响应剔除。
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { isInside } = require("../agent/paths");
 const {
   isDangerousLabel,
   normalizeUrl,
-  sameOriginGuard,
-  SKIP_URL_RE,
-  FILE_URL_RE,
   clusterByPathPrefix,
-  pickEnqueueLinks,
-  createBudget,
   buildDraftSkeleton,
   buildSnapshot,
   pruneStructure,
@@ -42,63 +37,12 @@ test("normalizeUrl: strips hash, keeps query, rejects non-http", () => {
   assert.equal(normalizeUrl("not a url"), null);
 });
 
-test("sameOriginGuard: same ok, cross/subdomain/invalid rejected", () => {
-  const o = "https://www.upwork.com";
-  assert.equal(sameOriginGuard("https://www.upwork.com/nx/search", o).ok, true);
-  assert.equal(sameOriginGuard("https://evil.com/x", o).reason, "cross-origin");
-  assert.equal(sameOriginGuard("https://sub.upwork.com/x", o).reason, "cross-origin");
-  assert.equal(sameOriginGuard("::::", o).reason, "invalid-url");
-});
-
-test("SKIP_URL_RE blocks auth walls, FILE_URL_RE blocks assets but not path words", () => {
-  assert.ok(SKIP_URL_RE.test("https://a.com/login?next=/x"));
-  assert.ok(SKIP_URL_RE.test("https://a.com/nx/signup"));
-  assert.ok(!SKIP_URL_RE.test("https://a.com/nx/search/jobs/"));
-  assert.ok(FILE_URL_RE.test("https://a.com/doc.pdf"));
-  assert.ok(FILE_URL_RE.test("https://a.com/photo.jpg?w=100"));
-  assert.ok(!FILE_URL_RE.test("https://a.com/pdf-viewer"));
-});
-
-test("pickEnqueueLinks: same-origin only, skips auth/assets/visited, shallow first, capped", () => {
-  const origin = "https://a.com";
-  const visited = new Set(["https://a.com/seen"]);
-  const links = [
-    { href: "https://a.com/deep/a/b/c/d", text: "deep" },
-    { href: "https://a.com/jobs?x=1#top", text: "jobs" },
-    { href: "https://b.com/other", text: "cross" },
-    { href: "https://a.com/login", text: "login" },
-    { href: "https://a.com/doc.pdf", text: "pdf" },
-    { href: "https://a.com/seen", text: "seen" },
-    { href: "javascript:void(0)", text: "js" },
-  ];
-  const { enqueued, filtered } = pickEnqueueLinks(links, {
-    origin, maxLinks: 1, visited, depth: 0, maxDepth: 2,
-  });
-  // 浅路径优先且 maxLinks=1：只留 /jobs?x=1（hash 已去）
-  assert.deepEqual(enqueued, [{ url: "https://a.com/jobs?x=1", depth: 1, text: "jobs" }]);
-  assert.equal(filtered, 3); // cross + login + pdf
-
-  // 深度到顶后不再入队
-  const none = pickEnqueueLinks(links, { origin, maxLinks: 5, visited: new Set(), depth: 2, maxDepth: 2 });
-  assert.deepEqual(none.enqueued, []);
-});
-
 test("clusterByPathPrefix groups by first 2 path segments", () => {
   const c = clusterByPathPrefix([
     "https://a.com/jobs/1", "https://a.com/jobs/2", "https://a.com/feed",
   ]);
   assert.equal(c["/jobs"].length, 2);
   assert.deepEqual(c["/feed"], ["https://a.com/feed"]);
-});
-
-test("createBudget: page quota counts, time starts near zero", () => {
-  const b = createBudget({ maxPages: 2, maxDurationMs: 60000, minGapMs: 1 });
-  assert.equal(b.outOfPages(), false);
-  b.spendPage();
-  b.spendPage();
-  assert.equal(b.outOfPages(), true);
-  assert.ok(b.elapsedMs() < 1000);
-  assert.equal(b.outOfTime(), false);
 });
 
 test("shapeOutline: dedup with count, drops empties, caps and keeps first-seen order", () => {
@@ -122,10 +66,17 @@ test("shapeOutline: dedup with count, drops empties, caps and keeps first-seen o
   assert.equal(out[3].cursorPointer, true);
   assert.equal("cursorPointer" in out[2], false);
 
-  // max 截断：先见者优先
-  const capped = shapeOutline(raw, { max: 2 });
-  assert.equal(capped.length, 2);
-  assert.equal(capped[0].text, "首页");
+  // 双上限：max=可交互上限，maxText=非交互文本上限；截断按"首次出现"记账
+  const capped = shapeOutline(raw, { max: 1, maxText: 1 });
+  assert.deepEqual(capped.map((i) => i.text), ["首页", "找工作 平台"]);
+  const big = [
+    ...Array.from({ length: 201 }, (_, i) => ({ sig: "B" + i, text: "b" + i, interactive: true })),
+    ...Array.from({ length: 61 }, (_, i) => ({ sig: "T" + i, text: "t" + i, interactive: false })),
+  ];
+  const capped2 = shapeOutline(big);
+  assert.equal(capped2.length, 260); // 200 交互 + 60 文本
+  assert.equal(capped2[200].text, "t0");
+  assert.equal(capped2[259].text, "t59");
 });
 
 test("shapeClickables: dedup, drops empties, caps, keeps href", () => {
@@ -183,6 +134,15 @@ test("buildDraftSkeleton: knowledge draft with embedded snapshot (no code fields
   assert.equal(d.discovery.visitedCount, 1);
   assert.equal(d.discovery.skippedCount, 1);
   assert.ok(!("report" in d.discovery), "discovery 块不得残留材料包路径");
+  // digest 目录段：只承载各段规模，不承载业务信号
+  assert.equal(d.digest.pages, 1);
+  assert.equal(d.digest.interactive, 0); // outline 为空
+  assert.equal(d.digest.responseBodies.returned, 0);
+  assert.equal(typeof d.digest.snapshotKb, "number");
+  assert.ok(
+    !("topApis" in d.digest) && !("routes" in d.digest) && !("dangerousLabels" in d.digest),
+    "digest 收窄为目录档：接口家底/危险词仍由 LLM 进 snapshot 段自己看"
+  );
 });
 
 test("buildSnapshot: 只留可交互元素，跨页框架归并 chrome，links/controls 不入画像", () => {
@@ -247,6 +207,52 @@ test("pruneStructure: SVG/渐变图元噪音剔除、列表截断", () => {
   const out = pruneStructure({ lists, forms: [], passwordFields: 0 });
   assert.deepEqual(out.lists, [{ parent: "UL.list", child: "LI.item", count: 20 }]);
   assert.deepEqual(pruneStructure({ lists }, { maxLists: 0 }).lists, []);
+});
+
+test("pruneCapture: 二进制先杀 + JSON优先小体先重排 + 总预算降级 shape/512B 样例", () => {
+  const big = JSON.stringify({ items: Array(500).fill(1), meta: "m" }); // 1021 字符 > 512，可验证截断上限
+  const cap = {
+    totalRequestsSeen: 5,
+    returned: 5,
+    requests: [
+      { url: "https://a.com/big", type: "xhr", mimeType: "application/json", body: big },
+      { url: "https://a.com/small.json", type: "xhr", mimeType: "application/json", body: "y".repeat(100) },
+      { url: "https://a.com/img", type: "xhr", mimeType: "image/webp", body: "z".repeat(500) },
+      { url: "https://a.com/doc", type: "document", mimeType: "application/json", body: '{"k":1}' },
+      { url: "https://a.com/bin", type: "fetch", mimeType: "application/x-protobuf", body: "p".repeat(800) },
+    ],
+  };
+  // 默认 256KB 预算：全留；二进制 MIME（webp/x-protobuf）被杀；
+  // 重排 = JSON 组在前（doc 的 type 是 document 但 mime 是 json 也进 JSON 组）、组内小体先。
+  const out = pruneCapture(cap);
+  assert.deepEqual(out.requests.map((r) => r.url), [
+    "https://a.com/doc",
+    "https://a.com/small.json",
+    "https://a.com/big",
+  ]);
+  assert.ok(out.requests.every((r) => !r.bodyOmitted));
+  assert.equal(typeof out.bytesKb, "number");
+
+  // 预算 0：所有体降级 —— JSON 体带 shape，非 JSON 体截 512B 占样
+  const tight = pruneCapture(cap, { bodyBudgetKb: 0 });
+  const [doc, small, bigR] = tight.requests;
+  assert.ok(doc.bodyOmitted && small.bodyOmitted && bigR.bodyOmitted);
+  assert.deepEqual(doc.shape, { root: "object", keys: { k: "number" } });
+  assert.deepEqual(bigR.shape, { root: "object", keys: { items: "array(500)", meta: "string" } });
+  assert.equal("shape" in small, false); // "yyy…" 不是合法 JSON，无 shape 可提
+  assert.equal(doc.body.length, 7); // '{"k":1}' 7 字符 < 512，slice 不截不断长
+  assert.equal(bigR.body.length, 512);
+});
+
+test("jsonShapeOf: 数组取首条记录形状，超 24 键截断", () => {
+  const { jsonShapeOf } = require("../runner/discover");
+  const many = {};
+  for (let i = 0; i < 40; i++) many["k" + i] = i;
+  assert.deepEqual(jsonShapeOf([{ id: 1, t: "x" }]), {
+    root: "array(1)",
+    record: { id: "number", t: "string" },
+  });
+  assert.equal(Object.keys(jsonShapeOf(many).keys).length, 24);
 });
 
 test("discoverRun: 位置旗标（--out-dir/--draft）显式拒绝，不静默忽略", async () => {
