@@ -21,9 +21,6 @@
 | ✅ 在 | CLI、桥发现/注册表、路由（tab FIFO + clientId 租约）、鉴权（node 侧）、`doctor`、测试 |
 | ❌ 不在 | MV3 扩展（manifest、service worker、`chrome.debugger`、页内注入、侧边栏）→ 见 [synapse](https://github.com/2948985750/synapse) |
 
-两侧唯一的"重复"是 `ws-auth.js`：浏览器不能 `require` node 模块，所以协议
-`wb-cdp-ws/2`（HMAC 挑战/证明）两边各实现一份，由扩展仓库的 `extension/test/test-ws-auth.js` 做互通验证。
-
 ## 模块
 
 | 模块 | 内容 |
@@ -165,11 +162,8 @@ node runner/discover.js --url https://site.com --max-pages 20 --depth 2 --sessio
 `clickables`、结构线索（已剔 SVG 图元）与同源/JSON 响应体；跨页重复的站点框架归并进
 `snapshot.chrome` 一份。知识字段为空待 agent 补。不存在独立的材料包/报告文件。
 
-1. **读快照**：`snapshot.chrome`（全站共用导航/侧栏/页脚，只存一份）+ `snapshot.pages[]`
-   ——`outline`（可交互元素：`sig` 元素标识 + `text`）、`clickables`（非常规可点容器）、
-   `dangerous`（危险词命中，只记不点）、`structure`（列表/表单线索）、
-   `capture.requests[]`（同源/JSON 响应体）。`outline` 过小或链接为 0 的页面
-   疑似未渲染完，单页重跑再下结论。
+1. **读目录 → 读快照**：先看 draft 的 `digest` 段（各段规模）定盘子，再按需开 `snapshot.pages[0]`，不整文件吞读；并提一句超预算响应体带 `shape`+512B 样例
+
 2. **圈功能清单**：路由簇（`limits.routes`）+ 导航类 clickables + 页标题交叉定主功能；
    `/legal`/`/blog`/营销页是噪音；登录墙路由记 pending 不强进；
    危险动作（保存/投递/支付）**只记 `flows`，永不代执行**。

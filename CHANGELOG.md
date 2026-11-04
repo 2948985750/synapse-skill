@@ -7,6 +7,326 @@
 
 ---
 
+### 变更：基础动词 click/type 也迁到 CLI（操作层 100% 归 skill 仓，扩展只留观测+基建）（2026-11-02）
+
+- **背景**：解耦手势后，操作层仍有一处不一致——`click-el`/`type-el`（合成事件动词）
+  还作为扩展具名命令存在，改它们仍要动扩展。本次把它们也迁到 CLI 侧。
+- **修法**：`agent/gestures.js` 的 `GESTURE_BODIES` 增 `click`/`type` 两个 body（逐字镜像
+  扩展 `actExpr` 行为：`el.click()`、native value setter + input/change、`__CLEAR__` 前缀）；
+  cli.js 的 `click-el`/`type-el` case 改走 `gestureCmd`（`cdp Runtime.evaluate` 发射），
+  不再发具名 `click-el`/`type-el`；`test-commands.js` el-args 块改断言 cdp 形态；
+  `test/test-gestures.js` 增 click（合成 click/越界拒绝）+ type（setter/`__CLEAR__`）页内用例。
+- **边界定型**：`setfile` 本质是 CDP `DOM.setFileInputFiles` 域方法（不是合成手势），
+  **留在扩展当基建**；`snapshot`（观测）也留扩展。即：**扩展 = L0 传输/安全 + L1 观测 +
+  CDP 域能力；CLI = 全部合成事件动词（13 手势 + click/type 共 15 个）**。
+- **扩展**：一行不动、不 bump、不重载（0.15.1 冻结）。扩展里 `click-el`/`type-el` 具名
+  case 保留为休眠基线（CLI 不再发，直接发仍可用），避免为删死代码再动一次扩展。
+- **测试**：本仓 `npm test` 全绿（含 click/type cdp 形态 + 页内行为）；扩展仓 0.15.1 全绿。
+
+---
+
+### 变更：手势层解耦到 CLI（扩展回归纯基建，手势不再进扩展）（2026-11-02）
+
+- **背景**：前两轮把全量手势做成扩展内具名命令（试过 0.16.0/0.17.0，均未发布）。
+  用户定调"扩展=稳定基建，交互层迭代不跟着扩展 bump/重载"，拍板"解耦到 CLI"。
+- **修法（跨两仓）**：
+  - 扩展仓 [synapse](https://github.com/2948985750/synapse) **git 回退到 0.15.1 纯基建**
+    （回退 page-actions.js / commands.js / 两个测试 + 版本 7 文件），只留
+    `snapshot`/`click-el`/`type-el`/`setfile` + 通用 `cdp`/`run` 通道 + 锁/租约/鉴权；
+    手势代码与 0.16/0.17 版本号全撤，扩展不再感知"手势"这个概念。
+  - 本仓：新增 `agent/gestures.js`（页内手势 JS 构造器 + 镜像 collector + async 标记），
+    CLI 的 13 条手势命令改走**通用 `cdp Runtime.evaluate` 通道**发射（`gestureCmd` 助手），
+    不再引用扩展具名手势命令；新增 `test/test-gestures.js`（页内行为 + collector 逐字
+    同步守卫，扩展仓在场时 live 比对、缺席时退化 marker+黄金串）。
+- **收益**：手势迭代 = 只改 skill 仓，扩展不用再 bump/重载；扩展 **0.15.1 即足够**
+  （`cdp`/`run` 是稳定基建，0.15.1 就有，带锁/租约）。
+- **代价/纪律**：collector（`EL_CANDIDATE_SEL`/`COLLECTOR_SRC`）在 skill 仓有一份镜像，
+  须与扩展仓 `snapshot` 逐字一致——`test-gestures.js` 强校验（live 时直接比对扩展源）。
+  页内仍是合成事件（isTrusted:false），受信输入走 cdp 配方不变。
+- **测试**：本仓 `npm test` 全绿（bridge 28 + 命令表 35 + 手势 cdp 形态 + collector 同步
+  + 手势页内行为 + 回归 10 + discover 13 + actions 19）；扩展仓回 0.15.1 全绿。
+- **注**：下方「补全 3 个一等交互原语（扩展 0.17.0）」与「全量交互原语升级为一等手势命令
+  （扩展 0.16.0）」两条随本次回退**作废**——那部分手势代码已移出扩展、迁到本仓
+  `agent/gestures.js`，扩展版本停在 0.15.1。
+
+---
+
+### 变更：补全 3 个一等交互原语（容器水平滚动 / 触摸滑动 / 文本选中）（2026-11-02）〔已随上方解耦回退作废〕
+
+- **背景**：0.16.0 全量手势后仍留 3 处缺口——
+  1. **轮播/可滚容器**：`EL_CANDIDATE_SEL` 只收可交互控件，`overflow-x` 的 div 拿不到
+     snapshot 索引，`scroll-el` 又只会竖向；
+  2. **触摸滑动**：`touch-el` 只有 tap（touchstart/touchend），没有 touchmove 序列——
+     移动端模拟/下拉刷新/触摸轮播做不了；
+  3. **文本选中**：复制/朗读/引用流缺一等命令（合成 Ctrl+C 不会真进剪贴板）。
+- **修法（跨两仓）**：
+  - 扩展仓 [synapse](https://github.com/2948985750/synapse) 0.16.0 → 0.17.0：
+    新增 `swipe-el`/`select-text-el` 命令 + **`el` 支持 `{"sel":"css"}`** 直接定位
+    （容器/画布等非候选节点，selector 未命中即拒）+ `scroll-el` 值协议升级
+    `{axis v|h, delta|null}`（水平走 scrollLeft/scrollBy；旧纯字符串兼容）。
+  - 本仓：`agent/cli.js` 2 个新 case（swipe-el/select-text-el）+ `--hscroll` 旗标 +
+    `parseElArg` 接受 `{"sel":"css"}`；`agent/commands.js` 33 → **35** 条（select-el 行
+    更新、select-text-el/swipe-el 入表、FOOTER 补 `--hscroll`）；`npm run usage:sync`
+    再生成 SKILL.md 用法块；`test/test-commands.js` 手势守卫补 5 条断言；README 手势表
+    扩行（文本选中/触摸滑动/页面回退/文件拖放/缩放/媒体 seek/volume/剪贴板授权/滚动行
+    升级）；SKILL.md「注意事项」11 → 13 条 + `{"sel"}` 说明。
+- **信任边界**：三者均页内合成事件（isTrusted:false）；复制须 `execCommand('copy')`
+  或受信通道（select-text-el 只管选中文本，不管复制）。
+- **测试**：本仓 `npm test` 全绿（bridge 28 + 命令表 35 + 回归 10 + discover 13 +
+  actions 19）；扩展仓 `npm test` 全绿（verify-version 0.17.0 + tablock 8 + lib 27 +
+  background 37）。
+
+---
+
+### 变更：全量交互原语升级为一等手势命令（2026-11-02）〔已随解耦回退作废：手势迁至本仓 gestures.js，扩展回 0.15.1〕
+
+- **背景**：标准交互层此前只有 3 个 index 化命令（`click-el`/`type-el`/`setfile`），
+  网页上其它手势（悬停/双击/长按/右键/拖拽/滚轮/特殊键/下拉/触屏/媒体…）只能走
+  `cdp`（全 CDP）/`run`（全 JS）两条裸通道照抄配方——配方难抄（IIFE 漏 `()`、
+  mouseWheel 漏 `deltaX` 都是实测坑），受信输入还要懂 CDP 协议细节。
+- **修法（跨两仓）**：
+  - 扩展仓 [synapse](https://github.com/2948985750/synapse) 0.15.1 → 0.16.0：
+    `page-actions.js` 的 `actExpr` 从 click/type 扩到 11 act（hover/dblclick/contextmenu/
+    focus/scroll/select/media/drag/touch/longpress/key；longpress/key 异步，由新导出的
+    `ASYNC_ACTS` 标识、`awaitPromise:true` 执行）；`commands.js` 抽共用 `runAct`
+    （锁→租约→attach→evaluate）并暴露 11 条新命令（`hover-el`/`dblclick-el`/`rightclick-el`/
+    `focus-el`/`longpress-el`/`touch-el`/`scroll-el`/`key-el`/`select-el`/`media-el`/
+    `drag-el`），全部复用 snapshot 索引 + label 漂移校验。
+  - 本仓：`agent/cli.js` 11 个 case + 3 个新旗标（`--hold <ms>` / `--delta <px>` /
+    `--modifiers ctrl,shift|0-15`，逗号名单自动转位掩码 Alt1|Ctrl2|Meta4|Shift8，
+    未知词报错）；`agent/commands.js` 11 条表条目（共 33 条）+ FOOTER 选项行补 3 旗标；
+    `npm run usage:sync` 再生成 SKILL.md 用法块；`test/test-commands.js` 增手势参数形态
+    守卫（`ALL-GESTURE-ARGS-OK`）；README「交互原语」重排为「一等命令（首选）/
+    受信裸通道（兜底）」两列表（剪贴板/移动模拟仍仅裸通道）；SKILL.md「注意事项」
+    注明合成事件 isTrusted:false、受信站点回退 cdp/run。
+- **信任边界**：这些命令页内发的是**合成事件（isTrusted:false）**，信任级别同
+  click-el——多数站点的悬停/下拉/快捷键能直接触发；只认受信输入的 SPA 处理器走
+  CDP `Input.dispatch*` 配方（README 表格第二列）。
+- **红线不变**：写操作永不代执行（双击/长按可能唤起含"删除"的菜单，写类只记不点
+  纪律照旧）；小红书/抖音媒体卡片双击=点赞，禁用。
+- **测试**：本仓 `npm test` 全绿（bridge 28 + 命令表 33 + 回归 10 + discover 13 +
+  actions 19）；扩展仓 `npm test` 全绿（verify-version + tablock 8 + lib 24 +
+  background 37）。
+
+---
+
+### 变更：手势配方（交互原语）真机验收——3 处配方修正 + 未触发场景证据补全（2026-11-02，web.whatsapp.com）
+
+- **现象**（桥 sid=default 真机验收；任务 A 说明：已开 4 标签 zhipin.com / web.whatsapp.com /
+  creator.douyin.com / upwork.com 的域**全部**已有 draft 画像且含已结晶 actions
+  （5/2/2/2 条），不符合「profiles/ 与 draft/ 下都无画像」的 discover 选域红线——
+  **单页 discover 实跑跳过**；旧旗标拒绝路径已验证：`--plan quick --max-pages 5` 被显式
+  拒绝（exit 1「不接受的参数: --plan --max-pages」），无 --force 时 draft 已存在同样拒绝）：
+  - 原样跑通 ✅：悬停（mouseMoved 后 reaction-entry-point 由隐转显）/ 双击（clickCount 1→2，
+    inert 目标无副作用）/ 滚动跳位（虚拟列表末行 scrollIntoView → 22 行全渲染）/ 特殊键
+    （Tab/Shift+Tab 焦点迁移、Esc 关两个抽屉层）/ 快捷键（Ctrl+A 选中 + Backspace 复原，
+    全程净零状态）/ 右键菜单（消息上右键出 8 项 DOM 菜单，含危险词「删除」——只记录未点）。
+  - 配方原样跑不通（🔧，共 3 处）：
+    1. **定位前置漏尾部 `()` 调用**：原样照抄时表达式求值为函数定义，桥回
+       `{"type":"function","value":{}}` 取不到值；补 `()` 后正常返回 `{x,y,label}`。
+    2. **滚轮漏 `deltaX`**：CDP 校验直接报 `-32602 'deltaX' and 'deltaY' are expected for
+       mouseWheel event`；参数补全后本桥 wheel 事件仍 CDP 超时 5 次、事件未落页面
+       （scrollTop 不变）→ 该桥滚动须回退 run 通道。
+    3. **移动模拟还原路径不可靠**：`clearDeviceMetricsOverride` 回 ok 但视口停在 390×844，
+       再 set 原始值亦无效；`navigate` 重载同 URL 才还原 1699×982（已回读 innerWidth 确认）。
+  - 站点无适用场景（⏭️，记证据不判失败）：长按（鼠标按住 1/2/3s 无菜单无开聊）、
+    拖拽（无 `[role=separator]`/col-resize 元素）、下拉选（主/开聊/抽屉视图均 0 个原生
+    `<select>`，站点用自绘列表）、媒体（各视图 0 个 `<audio>`/`<video>`）、剪贴板
+    （`navigator.clipboard` write/read 均 NotAllowedError——非手势上下文被拦）、触屏
+    （touchStart CDP 3 次超时、探针监听器 0 事件、桌面版无触屏交互）、选文件
+    （唯一 `input[type=file]` 属「发送文档」写路径，按红线不触发）。
+  - 附带发现（写进实测记录行，未改配方行）：字符输入须 `type:"char"`（rawKeyDown 带
+    text 被忽略）；click-el `--label` 需整串精确匹配（多行 label 截子串被 label drift 拒）；
+    本桥 wheel/touchStart CDP 会整体超时（mousePressed/mouseReleased/mouseMoved 正常）。
+- **修法**（仅 README「交互原语（手势配方）」节 3 行配方 + 节末 1 行实测记录，无 js 改动）：
+  1. 定位前置：IIFE 末尾补 `()`，并加注「漏掉时表达式退化为函数定义、桥回
+     `{"type":"function"}` 取不到值」。
+  2. 滚轮行：params 补 `"deltaX":0` + 注「deltaX 不可省（CDP 校验）+ 本桥 wheel CDP 偶发
+     超时未落页面，滚动回退 run 通道 `el.scrollBy(0,N)` / `el.scrollTop=…`」。
+  3. 移动模拟行：还原注改「clear 可能回 ok 但不还原、再 set 亦无效 → `navigate` 重载同
+     URL 还原；还原后务必回读 `innerWidth` 确认」。
+  4. 节末新增「实测记录（2026-11-02，web.whatsapp.com）」行：逐手势 ✅/🔧/⏭️ + 证据。
+- **验证**：`npm test` 全绿（bridge 28 + 命令表/回归 10 + discover 13 + actions 19，
+  零浏览器）；本次未改 js，`node --check` 不适用。
+- 提交：未提交
+
+---
+
+### 变更：discover 退役程序 BFS → 单页富快照；全量交互原语以配方形式纯扩充
+
+- **背景**：discover 原来是「有界同源 BFS 爬取」（跟 `<a>` 自动翻页，`--max-pages`/`--depth`/
+  `--max-links`/`--gap-ms`/`--duration-ms` + `pickEnqueueLinks` + `createBudget`）。
+  但采集的定位是「工具层采全可交互元素（省 token）」+「LLM 实验控制试出交互→目的的映射」，
+  程序跟链接猜路由既多余又猜不准（SPA 里跳转多是 `cursor:pointer` 容器 + `pushState`，
+  DOM 里没有 `<a>`）。用户拍板退役 BFS。
+- **修法**（discover 单页化）：
+  1. `runner/discover.js` 只开入口页取单页富快照（全部可交互元素含 SPA 跳转容器 + 结构 +
+     同源/JSON 响应体），删 `pickEnqueueLinks`/`createBudget`/`LINKS_PROBE_JS`/`pathDepth`
+     及 5 个 BFS 旗标；`--plan` 早已移除（纯回显，无信息量）。
+  2. `agent/commands.js` 命令表 discover 行改单页旗标；`agent-collect.js` 委托不变。
+  3. 测试 `test-discover.js` 删 BFS 相关 2 项（15→13）。
+  4. SKILL/README 同步：整站盘点改「单页富快照 + LLM 交互观测补路由」，移除旧多页描述。
+- **全量交互原语（纯扩充，零结构改动）**：标准交互层本就只 index 化
+  `click-el`/`type-el`/`setfile` 三个；其余网页手势（悬停/双击/长按/右键/拖拽/滚轮/滚动/
+  特殊键/快捷键/下拉/触屏/媒体/剪贴板/移动模拟）全都能做，只是走通用通道
+  `cdp`（全 CDP 透传，无方法白名单）/`run`（全 JS）。本次**不加新命令、不碰扩展仓库、
+  不动命令架构**——只在 README 加「交互原语（手势配方）」节（每个手势的精确 `cdp`/`run`
+  调用 + 发射前危险词/写类护栏 + 反爬节奏），SKILL.md「注意事项」加一行指路。
+- **验证**：`node --check` 全过；`npm test` 全绿（bridge 28 + 命令表 22===实现 +
+  回归 10 + discover 13 + actions 19，零浏览器）。真机（已登录站点）上的 discover
+  单页跑通 + 手势配方实触发，留待用户指定站点验收。
+- 提交：未提交（当次纪律：不 git 提交）
+
+---
+
+### 变更：移除 discover 的 --plan 旗标（多余的回显，无信息量）
+
+- **现象**：`--plan` 只回显调用方自己传入的预算上限（maxPages/depth/duration/gap）+
+  守卫清单 + 输出路径——不预测页数（路由枚举只能真跑 BFS 得出，代码注释本就写明
+  「plan 不含路由枚举」）。dry 确认的收益（长操作前看一眼）小于代价（多一步、
+  多一个旗标、命令表多一段说明），判定为冗余。
+- **修法**：`runner/discover.js` 删 ALLOWED_FLAGS 的 `--plan`、`planOnly` 常量与
+  整个 `if (planOnly)` 短路分支（L570-599）、用法文案；`agent/commands.js` 命令表
+  形状行删 `[--plan]` 说明删对应句（顺带把此前漏掉的 `--settle-ms 2500` 补进形状行）；
+  SKILL.md「怎么启动」与 usage 块（usage:sync 重生成）、README 整站盘点命令块同步。
+  全仓 `--plan` 残留 0（CHANGELOG 历史条目除外）；`npm test` 全绿（bridge 28 + 命令表
+  守卫 22 条 + 回归 10 + discover 守卫 + actions 19）。
+- 提交：未提交（当次纪律：不 git 提交）
+
+---
+
+### 变更：操作工作流并入 SKILL.md——"细节见 README" 双跳指针取消
+
+- **现象**：SKILL.md 把操作知识指到 README（「细节见 README 画像生产·整站盘点」），
+  裸指针无路径；agent 当前工作目录通常不是技能根，解析不稳定——用户连续三问暴露
+  （"skill 里没写采集模式""README 里有啥""agent 从哪读 README"）。
+- **修法**：README「操作：画像生产与链路恢复（agent 工作流）」整节并入 SKILL.md
+  新节「画像生产与链路恢复（操作细节）」（L87-163，紧随「采集/画像任务」，
+  摘要→细节阅读顺序）：整站盘点（含 2026-11-02 新增的功能覆盖与动作结晶第 3 步）/
+  单功能补画像/发现顺序与故障转移/健康与恢复。README 原位只留一行指针，
+  单一事实源防双份漂移；SKILL.md 入口段写明路径约定（README.md 在技能根目录，
+  仅查机制/测试/路径配置文档时才读，如「动作结晶」机制节仍在 README）。
+- **提交**：未提交（当次纪律：不 git 提交；`npm test` 全绿 19/19，
+  命令表守卫块未动）
+
+---
+
+### 变更：runner 结晶跳转台——`list` 动作菜单 + no-action 的 exit 1 附结晶指引
+
+- **背景**：结晶回路「消费（runner 快路径）→ 即席（agent 慢路径）→ 结晶（写回
+  actions[]）→ 再消费」的最后一环此前只存在于 agent 脑内约定：runner 查无 action 时
+  只报「现有：…」，agent 不知道下一步该结晶、往哪写、必带什么字段。
+- **设计判断**：结晶步骤**不进 runner**（runner 是纯数据解释器；产 action 数据需要
+  选择器稳定性/验证点/危险词判断 = agent 的判断活，runner 自产数据 = 退回老 recipes
+  死法 + 破信任边界）。runner 只做两件事：
+  1. `node runner/actions.js <domain> list`：列该域动作菜单（id/标题/side_effect/params），
+     查"有没有对应 action"不用读整个 JSON（纯函数 `formatActionMenu`，含"空画像→结晶
+     指引"分支）；
+  2. no-action 时 exit 1 消息升级为结晶指引：写哪（本画像 actions[]）、必带字段
+     （verified 日期+证据 / on_fail / guards 含 never）、写类边界（只到就绪态，触发词进
+     never）、结晶判据指回 SKILL.md（采集任务全覆盖 / 日常任务重复才结晶）。
+- **文档同步**：SKILL.md 任务路由第 1 条加 `list` 查菜单、第 3 条改为「没有匹配动作 →
+  即席 → **结晶步骤**」显式三步；README 命令示例加 list 行、「Agent 触发路径」补结晶
+  循环与「runner 只指路不代写」分工；适用边界两面（消费侧高频 / 采集任务全功能）在
+  前一条目（全功能覆盖规则进 skill）已同步。
+- **测试**：test-actions 18→19（formatActionMenu 有/空画像两分支）；list 与 not-found
+  实跑验证（mail.google.com list 列 send-mail；upwork fake-action exit 1 附指引）。
+- 提交：未提交（当次纪律：不 git 提交；`npm test` 全绿）
+
+---
+
+### 修复：采集任务（生产侧）的全功能覆盖规则没进 skill，重跑会退回「只采一条链」
+
+- **现象**：2026-11-02 全站点采集轮次里，小红书只结晶了搜索链；用户要求「所有功能都要
+  完成功能交互」，该规则当时只存在于当次指令——SKILL.md 只有消费侧路由（任务来了先查
+  `actions`），README 整站盘点流程停在「圈功能清单→补知识字段」，没要求把每个功能交互
+  到底再结晶。下次换会话/换人跑采集，必然退回一条链。
+- **根因**：动作结晶设计落地的是消费路径 + 高频任务「跑通一次才沉淀」的积累规则；
+  生产侧（用户说「采集 xx 站 / 补全画像 / 把所有站跑一遍」）的覆盖要求
+  「覆盖单位是功能不是链」一直是隐性共识，没写进任何文件。
+- **修法**：SKILL.md 新增「采集/画像任务：全功能覆盖，不是一条链」节（四条：先圈全功能
+  清单 → 逐功能即席交互到端到端验证、通过才结晶 → 写类停在不可逆步骤前 + pending
+  纪律 + 反爬同站串行/多站并行 → 汇报以功能覆盖表为基准）；README 整站盘点插第 3 步
+  「功能覆盖与动作结晶」（原 3/4 顺延 4/5，人审汇报加功能覆盖表），动作结晶「适用边界」
+  改为两面（消费侧高频才结晶 / 采集任务全功能都结晶），SKILL.md 任务路由第 3 条加例外指回。
+- 提交：未提交（当次纪律：不 git 提交；`npm test` 全绿）
+
+---
+
+### 变更：runner 参数化入口——entry.url 支持 {param} 展开 + navigate 步骤（4 处 pending 转正）
+
+- **背景**：动作结晶首版里 runner 的 `entry.url` 原样使用（findOrOpenTab 直接
+  `new URL(entry.url)`），「按 ID 直达」型功能（抖音视频 /video/<id>、直播间 /<wid>、
+  upwork ?q=<词>、小红书用户主页 /user/profile/<id>）只能把某次实测的样本 ID 写死进
+  entry——换个 ID 就失效。各站点 agent 路把这 4 处全部记成 pending（action_when_runner_supports_template），
+  卡在同一能力缺口上。
+- **修法**：runner 两处展开 + 一处步骤：
+  1. `main` 里 `entry.url = expandParams(entry.url, params)`（entry 模板与 steps 走同一展开器，缺参统一报错）；
+  2. `STEP_OPS` 增 `navigate`（url 必填可带 {param} 模板，waitMs 默认 8s），
+     execStep 走 CDP navigate；
+  3. validateAction 同步（navigate 缺 url / 坏 waitMs / click mouse 模式 offset 非数字都被抓）。
+  测试 14→18 项（navigate schema + resolveEntry/entry 展开 + mouse offset 校验）。
+- **转正 4 处**（全部实跑 exit 0，2026-11-02）：
+  - `xiaohongshu.com#read-user-page`：entry /user/profile/{user_id}，pending→actions（顺带把误重复追加的
+    15 条同 ID 副本去重，actions[] 回到 5 条唯一）；
+  - `douyin.com#read-video`：entry /video/{id}（样本 7703162648518533247，797ms）；
+  - `live.douyin.com#read-live-room`：entry /{wid}（样本房下播落离线页，按 on_fail 从
+    read-live-list 取在播房间 888738367314 重验，28ms）；
+  - `upwork.com#search-jobs`：entry ?q={query}（首次导航落 Cloudflare 挑战页，agent
+    重载一次放行后 runner 复用同 tab 不再触发，21ms；该注记已进 verified）。
+  4 处 pending 文案同步改写为「已转正」，保留各自仍开放的尾巴（/user/{secUid} 被
+  target=_blank 阻塞、写类功能等执行边界拍板）。
+- 提交：未提交（任务纪律：不 git 提交；`npm test` 全绿，test-actions 18/18）
+
+---
+
+### 修复：runner/actions.js click 步骤护栏恒 undefined（queryInfo 漏 return）
+
+- **现象**：2026-11-02 结晶 `web.whatsapp.com#read-conversation`（mouse 原语点击
+  会话行）时，runner 直跑在 step 1（click）崩 `Cannot read properties of
+  undefined (reading 'disabled')`（exit 3）。wait 型步骤不受影响（它们只靠
+  pollUntil 的抛错语义，不需要返回值）。
+- **根因**：`queryInfo` 里 `await pollUntil(...)` 没写 `return`，函数恒 resolve
+  undefined；click/type 分支的 `info.disabled` 检查随之恒崩。此前所有已结晶
+  action（Gmail send-mail 等）不含 click 步骤（提交靠 native-enter），从未触发。
+- **修法**：`queryInfo` 返回 pollUntil 找到的元素 info；点击前护栏读标签
+  （guards.never + 全局危险词）从此对 click 步骤真正生效。
+- 提交：未提交（当次任务纪律：不 git 提交；2026-11-02 修复于 `web.whatsapp.com`
+  画像结晶过程中，`node --test test/test-actions.js` 全绿）
+
+---
+
+### 变更：动作结晶——flows 的机器可执行版（runner/actions.js + 画像 actions 字段）
+
+- **背景**：2026-10-26 退役老 recipes（per-site extractFn + 专属 runner）后，重复任务
+  （如 B2B 外联逐封发信）每次都要 agent 即席推理全流程，token 成本高且路径不稳定；
+  而 `flows` 只是给人/agent 读的自然语言菜谱。问题不是"该不该存动作"，而是
+  "存什么形态、谁解释、挂了怎么办"——老 recipes 死在：手写维护、选择器一断就停摆、
+  断了没有兜底、画像里存 JS 破坏了"惰性数据"信任边界。
+- **修法**：画像新增可选 `actions` 字段，仍是**纯数据**（CSS 选择器 + `{param}` 模板 +
+  等待/验证规则 + 护栏数字），由通用解释器 `runner/actions.js` 执行（click/type/wait
+  四原语 + verify，通道复用 api.js）。三条机制保证它比老 recipes 活得久：
+  1. 结晶式：agent 先按 flows 即席跑通，实测通过才沉淀（`verified` 带日期）；
+     action 是跑通路径的缓存，不是预维护的程序。
+  2. 兜底：失败 exit 3 带 trace + `on_fail`，agent 即席接管后回头修 action 数据。
+  3. 护栏硬执行：`side_effect=external` 真跑必须 `--yes`（`--dry` 永只打印计划、
+     exit 0）；`interval_s`/`daily_cap` 落数据根 `action-state/`，**verify 全过才计数**
+     （半失败发送不计入）；点击前读目标 text+aria-label 过全局危险词 + `guards.never`
+     黑名单，宁误拦不漏拦；recent 留 10 次参数审计。
+- **首个结晶**：`mail.google.com#send-mail`（flows 写信流程，2026-10-31 实测整链通过）。
+  已 dry-run 验证计划渲染与两条护栏路径（无 `--yes` 真跑 exit 2；dry exit 0）。
+- **SKILL.md 任务路由**：新增「先查动作，再即席」固定顺序——用户下站点任务先读画像
+  `actions` 走 runner 快路径（dry 核计划 → 缺参问用户 → 外发经确认 `--yes`），失败按
+  退出码分流（2 转述护栏、3 即席接管 + 回写结晶），无匹配则即席执行、高频任务跑通后
+  沉淀新 action。缺这环的话 actions 只是死数据，agent 永远不会主动走它。
+- **测试**：`test/test-actions.js` 14 项——参数展开/schema 校验/间隔/日上限/跨日清零/
+  never 词表/状态推进/页内表达式注入安全（值走 JSON.stringify 字面量）/argv 解析，
+  另有画像结构断言：凡含 `actions` 的画像必须过 schema 且带 verified/on_fail/guards，
+  send-mail 模板引用与 params 声明一致——防两代约定再度漂移。
+- 提交：`feat(actions): declarative action runner with hard guards + Gmail send-mail crystallization`
+
+---
+
 ### 变更：画像快照瘦身——只留可交互元素，站点框架归并 chrome（顺带修 snapshot 形状 bug）
 
 - **现象**：快照并入画像后两份 draft 达 1.08/1.16MB。无用数据来自四处：
