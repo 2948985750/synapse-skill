@@ -124,7 +124,7 @@ const COMMANDS = [
     name: "key-el",
     lines: [
       "key-el <tabId> <key> [<i|el-json>] [--modifiers ctrl,shift|0-15]",
-      "按键（异步；CLI 侧生成页内 IIFE，keydown→40ms→keyup，经 cdp 通道 awaitPromise 返回）；key=Enter/a/ArrowUp 等；省略 el 打到 document.body；--modifiers 逗号名单或位掩码（Alt1|Ctrl2|Meta4|Shift8）",
+      "按键（异步；扩展 0.16.0+ 支持）；key=Enter/a/ArrowUp 等；省略 el 打到 document.body；--modifiers 逗号名单或位掩码（Alt1|Ctrl2|Meta4|Shift8）",
     ],
   },
   {
@@ -135,7 +135,7 @@ const COMMANDS = [
     name: "longpress-el",
     lines: [
       "longpress-el <tabId> <i|el-json> [--hold <ms>]",
-      "长按（异步；pointerdown/mousedown → 按住 hold 毫秒 → up）；省略 --hold 默认 600ms；长按在部分站点弹上下文菜单/进多选",
+      "长按（异步；扩展 0.16.0+ 支持）；pointerdown/mousedown → 按住 hold 毫秒 → up；省略 --hold 默认 600ms；长按在部分站点弹上下文菜单/进多选",
     ],
   },
   {
