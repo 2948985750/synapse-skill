@@ -79,6 +79,19 @@ async function connect(opts = {}) {
     type: (tabId, el, text, o = {}) =>
       call("type-el", { tabId, el: normalizeEl(el), text, clear: !!o.clear }),
 
+    // 通用手势：hover/dblclick/contextmenu/focus/touch/scroll/select/media/
+    // drag/swipe/longpress/key/select-text（扩展 0.16.0+）。
+    gesture: (tabId, act, el, value) =>
+      call("gesture", { tabId, act, el: normalizeEl(el), value }),
+
+    // 按 CSS 选择器查询元素（text/aria/disabled/可见性），用于点击前护栏。
+    queryEl: (tabId, sel) => call("query-el", { tabId, sel }),
+    // 按 CSS 选择器输入（mode: native|native-enter|execCommand）。
+    typeCss: (tabId, sel, value, mode) =>
+      call("type-css", { tabId, sel, value, mode: mode || "native" }),
+    // hash 导航（可选 reload，用于 antiScrape 站点）。
+    gotoHash: (tabId, hash, reload) => call("goto-hash", { tabId, hash, reload }),
+
     // 任意 CDP：参数直接给对象，没有 JSON 字符串。
     cdp: (tabId, method, params = {}) => call("cdp", { tabId, method, params }),
   };

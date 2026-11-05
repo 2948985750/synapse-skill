@@ -178,20 +178,17 @@ function buildCmd(rest, opts = {}) {
     }
     return mod & 15;
   }
-  // 手势命令发射：页内 JS 由 agent/gestures.js 构造，走通用 cdp Runtime.evaluate 通道
-  // （扩展只当基建，不认具名手势命令；扩展 0.15.1 即支持）。async 手势带 awaitPromise。
+  // 手势命令发射：走扩展的具名 `gesture` 命令（扩展 0.16.0+ 支持）。
+  // async 手势（longpress/key）由扩展侧 Runtime.evaluate 的 awaitPromise 处理。
   function gestureCmd(act, tabId, el, value) {
-    const expression = buildGestureExpr(act, el, value);
+    const p = buildGestureExpr(act, el, value); // act 合法性校验
     return {
-      cmd: "cdp",
+      cmd: "gesture",
       args: {
         tabId: Number(tabId),
-        method: "Runtime.evaluate",
-        params: {
-          expression,
-          returnByValue: true,
-          awaitPromise: isAsyncAct(act),
-        },
+        act: p.act,
+        el: p.el,
+        value: p.value,
       },
     };
   }
@@ -332,8 +329,7 @@ function buildCmd(rest, opts = {}) {
     }
     case "click-el": {
       // <tabId> <i|el-json|sel-json>：el = snapshot 条目 {"i":3,"tag":"button","label":"搜索"}。
-      // 页内 JS 走 agent/gestures.js（与 13 手势同一构造器），经通用 cdp 通道发射；
-      // 执行前重解析（索引越界/label 漂移 → found:false 不执行）。
+      // 走扩展的 `gesture` 命令（click 分支），执行前重解析（索引越界/label 漂移 → found:false 不执行）。
       const [tabId, elArg] = args;
       if (!tabId || !elArg) usage();
       const el = parseElArg(elArg, labelOpt);
@@ -342,7 +338,7 @@ function buildCmd(rest, opts = {}) {
     }
     case "type-el": {
       // <tabId> <i|el-json|sel-json> <text> [--clear]：键入文本（native value setter +
-      // input/change 事件，兼容受控组件）；--clear 先清空。走通用 cdp 通道。
+      // input/change 事件，兼容受控组件）；--clear 先清空。走扩展的 `gesture` 命令。
       const [tabId, elArg, text] = args;
       if (!tabId || !elArg || text === undefined) usage();
       const el = parseElArg(elArg, labelOpt);
@@ -358,7 +354,7 @@ function buildCmd(rest, opts = {}) {
     case "focus-el":
     case "touch-el": {
       // <tabId> <i|el-json|sel-json>：单索引手势（悬停/双击/右键/聚焦/触摸点按）。
-      // 页内 JS 走 agent/gestures.js，经通用 cdp 通道发射（扩展不认具名手势命令）。
+      // 走扩展的 `gesture` 命令（对应 act 分支）。
       const act = {
         "hover-el": "hover",
         "dblclick-el": "dblclick",

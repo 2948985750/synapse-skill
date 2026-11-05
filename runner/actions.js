@@ -155,31 +155,10 @@ function stateFileFor(domain, actionId) {
 
 // ---------------- 页内探针（只读表达式，参数用 JSON.stringify 内嵌，免引号地狱） ----------------
 
-function jsQueryInfo(sel) {
-  return (
-    "(function(){var el=document.querySelector(" + JSON.stringify(sel) + ");" +
-    "if(!el)return null;" +
-    "var r=el.getBoundingClientRect();" +
-    "var t=(el.innerText||'').trim();" +
-    "var a=(el.getAttribute('aria-label')||'').trim();" +
-    "return {found:true,text:t.slice(0,120),aria:a.slice(0,120)," +
-    "disabled:!!(el.disabled||el.getAttribute('aria-disabled')==='true')," +
-    "visible:r.width>0&&r.height>0}})()"
-  );
-}
-
-function jsClick(sel) {
-  return (
-    "(function(){var el=document.querySelector(" + JSON.stringify(sel) + ");" +
-    "if(!el)return {ok:false,reason:'missing'};" +
-    "try{el.scrollIntoView({block:'center'})}catch(e){};" +
-    "el.click();return {ok:true}})()"
-  );
-}
-
 // 真实鼠标点击的定位探针：scrollIntoView 后返回视口坐标（CDP Input.dispatchMouseEvent
 // 吃视口坐标）。WhatsApp 等站点对合成 el.click() 无反应（2026-11-01 A/B 实测，见
 // web.whatsapp 画像 antiScrape），必须走 Input 域真鼠标序列。
+// 保留：这是只读探针（返回坐标），点击由 CDP Input 域直接完成，不涉及扩展手势层。
 function jsClickRect(sel) {
   return (
     "(function(){var el=document.querySelector(" + JSON.stringify(sel) + ");" +
@@ -188,40 +167,6 @@ function jsClickRect(sel) {
     "var r=el.getBoundingClientRect();" +
     "if(r.width<1||r.height<1)return null;" +
     "return {x:r.x,y:r.y,w:r.width,h:r.height}})()"
-  );
-}
-
-// 受控组件兼容写法与 type-el 同源：native value setter + input/change 事件。
-// native-enter 追加 Enter keydown（收件人 chip 收口）。
-function jsType(sel, value, mode) {
-  const v = JSON.stringify(value);
-  const base =
-    "(function(){var el=document.querySelector(" + JSON.stringify(sel) + ");" +
-    "if(!el)return {ok:false,reason:'missing'};" +
-    "var proto=(el.tagName==='TEXTAREA')?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;" +
-    "var d=Object.getOwnPropertyDescriptor(proto,'value');" +
-    "if(d&&d.set)d.set.call(el," + v + ");else el.value=" + v + ";" +
-    "el.dispatchEvent(new Event('input',{bubbles:true}));" +
-    "el.dispatchEvent(new Event('change',{bubbles:true}));";
-  const enter =
-    "el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));";
-  const exec =
-    "(function(){var el=document.querySelector(" + JSON.stringify(sel) + ");" +
-    "if(!el)return {ok:false,reason:'missing'};" +
-    "el.focus();" +
-    "var ok=document.execCommand('insertText',false," + v + ");" +
-    "return ok?{ok:true}:{ok:false,reason:'execCommand 返回 false'}})()";
-  if (mode === "execCommand") return exec;
-  return base + (mode === "native-enter" ? enter : "") + "return {ok:true}})()";
-}
-
-// hash 导航 + 可选 reload（antiScrape：Gmail 改 hash 后必须 reload 才真渲染）。
-// reload 会销毁执行环境，所以 fire-and-forget，之后由调用方轮询。
-function jsGoto(hash, reload) {
-  return (
-    "(function(){location.hash=" + JSON.stringify(hash) + ";" +
-    (reload ? "setTimeout(function(){location.reload()},80);" : "") +
-    "return 'ok'})()"
   );
 }
 
@@ -312,8 +257,7 @@ async function queryInfo(browser, tabId, sel, timeoutMs) {
   // click/type 步骤靠这个返回值做禁用检查与点击前护栏读标签（2026-11-02 补 return：
   // 之前漏写导致 click 步骤恒 undefined）。
   return await pollUntil(async () => {
-    const raw = await browser.run(tabId, jsQueryInfo(sel));
-    const v = raw && raw.result ? raw.result.value : raw;
+    const v = await browser.queryEl(tabId, sel);
     return v && v.found ? v : null;
   }, timeoutMs, 400, true);
 }
@@ -321,8 +265,7 @@ async function queryInfo(browser, tabId, sel, timeoutMs) {
 // 执行单步。返回 {skipped?:true}；失败抛错（带步骤上下文）。
 async function execStep(browser, tabId, st, stepTimeout) {
   if (st.unless) {
-    const raw = await browser.run(tabId, jsQueryInfo(st.unless));
-    const v = raw && raw.result ? raw.result.value : raw;
+    const v = await browser.queryEl(tabId, st.unless);
     if (v && v.found) return { skipped: true }; // 复用已存在的状态（如撰写窗口已开）
   }
   if (st.do === "wait") {
@@ -353,6 +296,7 @@ async function execStep(browser, tabId, st, stepTimeout) {
     if ((st.mode || "js") === "mouse") {
       // CDP Input 域真鼠标序列：对合成 el.click() 无反应的站点（WhatsApp 会话行，
       // 2026-11-01 A/B 实测）。offsetX/Y 相对元素左上角，省略 = 中心。
+      // 这是只读探针（返回视口坐标），仍走 run 通道。
       const raw = await browser.run(tabId, jsClickRect(st.sel));
       const rect = raw && raw.result ? raw.result.value : raw;
       if (!rect || !rect.w) throw new Error(`定位失败（不可见或 0 尺寸）：${st.sel}`);
@@ -364,15 +308,11 @@ async function execStep(browser, tabId, st, stepTimeout) {
       for (const params of [move, down, up]) await browser.cdp(tabId, "Input.dispatchMouseEvent", params);
       return {};
     }
-    const raw = await browser.run(tabId, jsClick(st.sel));
-    const v = raw && raw.result ? raw.result.value : raw;
-    if (!v || !v.ok) throw new Error(`点击失败：${st.sel}（${(v && v.reason) || "unknown"}）`);
+    await browser.gesture(tabId, "click", { sel: st.sel }, "");
     return {};
   }
   // type
-  const raw = await browser.run(tabId, jsType(st.sel, st._value, st.mode || "native"));
-  const v = raw && raw.result ? raw.result.value : raw;
-  if (!v || !v.ok) throw new Error(`键入失败：${st.sel}（${(v && v.reason) || "unknown"}）`);
+  await browser.typeCss(tabId, st.sel, st._value, st.mode || "native");
   return {};
 }
 
@@ -380,7 +320,7 @@ async function runVerify(browser, tabId, verify, params, defaultTimeout) {
   for (const [i, v] of (verify || []).entries()) {
     if (v.op === "navigate") {
       // fire-and-forget：reload 会销毁执行环境；之后轮询 href 直到包含 hash。
-      await browser.run(tabId, jsGoto(v.hash, v.reload !== false));
+      await browser.gotoHash(tabId, v.hash, v.reload !== false);
       const waitMs = v.waitMs || defaultTimeout;
       await pollUntil(async () => {
         const raw = await browser.run(tabId, "location.href+'|'+document.readyState");
@@ -397,8 +337,7 @@ async function runVerify(browser, tabId, verify, params, defaultTimeout) {
         const t = raw && raw.result ? raw.result.value : "";
         return typeof t === "string" && t.includes(expect);
       }
-      const raw = await browser.run(tabId, jsQueryInfo(v.sel));
-      const info = raw && raw.result ? raw.result.value : raw;
+      const info = await browser.queryEl(tabId, v.sel);
       return !!(info && info.found);
     }, v.timeout || 12000, 600, true);
     log(`verify[${i}] ${v.op}${v.op === "text" ? `「${expect.slice(0, 30)}」` : ""} 通过`);
@@ -558,11 +497,7 @@ module.exports = {
   labelViolates,
   stateFileFor,
   localDate,
-  jsQueryInfo,
-  jsClick,
   jsClickRect,
-  jsType,
-  jsGoto,
   loadProfile,
   loadState,
   resolveEntry,

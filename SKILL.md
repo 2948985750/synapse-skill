@@ -37,7 +37,7 @@ examples_en:
 
 - **读渲染 DOM**：`snapshot` 枚举可交互元素（索引化动作空间），`run` 执行任意页内 JS
 - **点选与输入**：`click-el`/`type-el` 两个基础动词，加 13 个手势——悬停、双击、长按、
-  右键、拖拽、滚动、下拉选、快捷键、触屏滑动、文本选中、媒体控制等
+  右键、拖拽、滚动、下拉选、快捷键、触屏滑动、文本选中、媒体控制等（扩展 0.16.0+）
 - **捕获接口响应**：`capture` 抓页面自身 XHR/fetch 的响应体（复用登录态，不重放）
 - **站点画像**：`profiles/*.json` 纯数据——元素快照 + 站点知识（`fieldMap`/`limits`/
   `antiScrape`/`dataEndpoints`）+ 已结晶 `actions`，可审阅可拷贝
@@ -217,9 +217,9 @@ one-shot 按 `--session`/`WB_SESSION` 找会话桥 → 其它活桥（最新优�
 | `drag-el` | `<tabId> <from-i\|json> <to-i\|json>` | HTML5 拖放全序列（dragstart→dragenter/dragover→drop→dragend，带 DataTransfer）；from/to 均为 snapshot 索引，目标 label 漂移会拒绝 |
 | `focus-el` | `<tabId> <i\|el-json> [--label <text>]` | 聚焦元素（target.focus()）；返回值 active 表示是否成为当前 activeElement |
 | `hover-el` | `<tabId> <i\|el-json> [--label <text>]` | 悬停（mouseover/mouseenter/mousemove）；用于悬停触发的下拉/气泡/懒加载 |
-| `key-el` | `<tabId> <key> [<i\|el-json>] [--modifiers ctrl,shift\|0-15]` | 按键（异步；CLI 侧生成页内 IIFE，keydown→40ms→keyup，经 cdp 通道 awaitPromise 返回）；key=Enter/a/ArrowUp 等；省略 el 打到 document.body；--modifiers 逗号名单或位掩码（Alt1\|Ctrl2\|Meta4\|Shift8） |
+| `key-el` | `<tabId> <key> [<i\|el-json>] [--modifiers ctrl,shift\|0-15]` | 按键（异步；扩展 0.16.0+ 支持）；key=Enter/a/ArrowUp 等；省略 el 打到 document.body；--modifiers 逗号名单或位掩码（Alt1\|Ctrl2\|Meta4\|Shift8） |
 | `list` | `—` | 列出所有标签页：tabId/标题/URL——一切后续命令的 tabId 从这里拿 |
-| `longpress-el` | `<tabId> <i\|el-json> [--hold <ms>]` | 长按（异步；pointerdown/mousedown → 按住 hold 毫秒 → up）；省略 --hold 默认 600ms；长按在部分站点弹上下文菜单/进多选 |
+| `longpress-el` | `<tabId> <i\|el-json> [--hold <ms>]` | 长按（异步；扩展 0.16.0+ 支持）；pointerdown/mousedown → 按住 hold 毫秒 → up；省略 --hold 默认 600ms；长按在部分站点弹上下文菜单/进多选 |
 | `media-el` | `<tabId> <i\|el-json> [play\|pause\|mute\|unmute]` | 媒体控制（play/pause/mute/unmute）；缺省 play；目标是 <audio>/<video> 元素 |
 | `navigate` | `<tabId> <url>` | 复用已有标签页导航到新 URL；默认等 load 完成，--nowait 跳过等待 |
 | `open` | `<url>` | 开新标签页；默认等 load 完成，返回 loaded；--nowait 跳过等待 |

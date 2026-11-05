@@ -15,8 +15,6 @@ const {
   labelViolates,
   stateFileFor,
   localDate,
-  jsGoto,
-  jsType,
   jsClickRect,
   loadProfile,
   resolveEntry,
@@ -165,12 +163,6 @@ test("labelViolates: 全局危险词 + 私有 never，命中返回词，放行�
 
 // ---------------- 页内表达式（审计：注入的 JS 必须是自包含只读/单点动作） ----------------
 
-test("jsGoto: hash 导航带 reload；不带 reload 则原地切", () => {
-  assert.ok(jsGoto("#sent", true).includes("location.reload()"));
-  assert.ok(!jsGoto("#sent", false).includes("location.reload()"));
-  assert.ok(jsGoto('#sent', true).includes(JSON.stringify("#sent")));
-});
-
 test("validateAction: guards.never 必须是数组；其他结构无需额外测试", () => {
   const ok = validateAction({
     title: "x",
@@ -196,17 +188,23 @@ test("jsClickRect: 只读定位探针——scrollIntoView + 返回视口 rect，
   assert.ok(expr.includes(JSON.stringify("div.row")));
 });
 
-test("jsType: native 走 value setter + input/change；native-enter 追加 Enter；execCommand 走 insertText", () => {
-  const native = jsType("input.a", "v", "native");
-  assert.ok(native.includes("HTMLInputElement.prototype"));
-  assert.ok(native.includes("new Event('input'"));
-  assert.ok(!native.includes("KeyboardEvent"));
-  const chip = jsType("input.a", "v", "native-enter");
-  assert.ok(chip.includes("KeyboardEvent('keydown'"));
-  const exec = jsType("div.a", "v", "execCommand");
-  assert.ok(exec.includes("execCommand('insertText'"));
-  // 值经 JSON.stringify 内嵌——注入即字面量，没有引号逃逸问题
-  assert.ok(jsType("input.a", '他说"hi"', "native").includes(JSON.stringify('他说"hi"')));
+test("镜像债：skill 侧不再有 DOM 交互构造器（全部归扩展侧 page-actions.js）", () => {
+  const actions = require("../runner/actions");
+  const gestures = require("../agent/gestures");
+  // 这些曾经在 runner/actions.js 里，迁移后不应再出现
+  assert.ok(!("jsQueryInfo" in actions), "jsQueryInfo 已迁移到扩展 query-el");
+  assert.ok(!("jsClick" in actions), "jsClick 已迁移到扩展 gesture(click)");
+  assert.ok(!("jsType" in actions), "jsType 已迁移到扩展 type-css");
+  assert.ok(!("jsGoto" in actions), "jsGoto 已迁移到扩展 goto-hash");
+  // 手势层变薄：不再持有 collector/quiet/guard 源码镜像
+  assert.ok(!("COLLECTOR_SRC" in gestures), "COLLECTOR_SRC 镜像已清理");
+  assert.ok(!("QUIET_SRC" in gestures), "QUIET_SRC 镜像已清理");
+  assert.ok(!("GUARD_SRC" in gestures), "GUARD_SRC 镜像已清理");
+  assert.ok(!("GESTURE_BODIES" in gestures), "GESTURE_BODIES 已迁移到扩展");
+  assert.ok(!("EL_CANDIDATE_SEL" in gestures), "EL_CANDIDATE_SEL 已迁移到扩展");
+  // 只留薄信号层
+  assert.ok(typeof gestures.buildGestureExpr === "function");
+  assert.ok(typeof gestures.isAsyncAct === "function");
 });
 
 // ---------------- navigate 步骤 + entry 参数化 ----------------
