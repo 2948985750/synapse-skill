@@ -50,70 +50,16 @@ const VERIFY_OPS = ["text", "exists", "navigate"];
 
 // schema 校验：宁可启动即报错，不可跑到一半才发现画像写错。
 // 返回错误消息数组（空 = 合法）。
+//
+// 精简结构：action 只保留 title + url（可含 {param} 模板）+ guards（可选，
+// 护栏载体，砍掉则外发动作失去 --yes 拦截与 never 危险词拦截）。
+// id 由 title 派生（小写 + 连字符），不再要求画像写死；url 同时承担 entry 与唯一步骤。
 function validateAction(action) {
   const errs = [];
   const at = (m) => errs.push(m);
   if (!action || typeof action !== "object") return ["action 必须是对象"];
-  if (typeof action.id !== "string" || !action.id) at("actions[].id 必填");
   if (typeof action.title !== "string" || !action.title) at("actions[].title 必填");
-  if (!action.params || typeof action.params !== "object" || Array.isArray(action.params)) {
-    at("actions[].params 必须是对象（参数名 → 说明）");
-  }
-  if (!Array.isArray(action.steps) || !action.steps.length) at("actions[].steps 必须是非空数组");
-  for (const [i, st] of (action.steps || []).entries()) {
-    const tag = `steps[${i}]`;
-    if (!st || typeof st !== "object") { at(tag + " 必须是对象"); continue; }
-    if (!STEP_OPS.includes(st.do)) { at(`${tag}.do 未知「${st.do}」（可选：${STEP_OPS.join("|")}）`); continue; }
-    if (st.do === "wait") {
-      if (!st.ms && !st.sel) at(`${tag}: wait 需要 ms 或 sel`);
-    } else if (st.do === "navigate") {
-      // URL 驱动导航（可用 {param} 模板）：搜索类站点（upwork ?q= / xhs keyword=）
-      // 的受控搜索框 DOM 驱动无效，只能直接开 URL。
-      if (typeof st.url !== "string" || !st.url) at(`${tag}.url 必填（可用 {param} 模板）`);
-      if (st.waitMs !== undefined && (!Number.isFinite(st.waitMs) || st.waitMs < 0)) {
-        at(`${tag}.waitMs 必须是非负数`);
-      }
-    } else {
-      if (typeof st.sel !== "string" || !st.sel) at(`${tag}.sel 必填（CSS 选择器）`);
-    }
-    if (st.do === "type") {
-      if (typeof st.value !== "string") at(`${tag}.value 必填（可用 {param} 模板）`);
-      if (st.mode && !TYPE_MODES.includes(st.mode)) {
-        at(`${tag}.mode 未知「${st.mode}」（可选：${TYPE_MODES.join("|")}）`);
-      }
-    }
-    if (st.do === "click") {
-      // mode "js"（默认，el.click()）| "mouse"（CDP Input 真鼠标序列——对合成点击
-      // 无反应的站点用，如 WhatsApp 会话行）；offsetX/offsetY 相对元素左上角，
-      // 省略 = 中心。
-      if (st.mode && !["js", "mouse"].includes(st.mode)) {
-        at(`${tag}.mode 未知「${st.mode}」（click 可选：js|mouse）`);
-      }
-      for (const k of ["offsetX", "offsetY"]) {
-        if (st[k] !== undefined && !Number.isFinite(st[k])) at(`${tag}.${k} 必须是数字`);
-      }
-    }
-    if (st.unless !== undefined && typeof st.unless !== "string") at(`${tag}.unless 必须是选择器`);
-    if (st.timeout !== undefined && (!Number.isFinite(st.timeout) || st.timeout <= 0)) {
-      at(`${tag}.timeout 必须是正数`);
-    }
-    if (st.note !== undefined && typeof st.note !== "string") at(`${tag}.note 必须是字符串`);
-  }
-  if (action.verify !== undefined) {
-    if (!Array.isArray(action.verify)) at("actions[].verify 必须是数组");
-    for (const [i, v] of (action.verify || []).entries()) {
-      const tag = `verify[${i}]`;
-      if (!v || typeof v !== "object") { at(tag + " 必须是对象"); continue; }
-      if (!VERIFY_OPS.includes(v.op)) { at(`${tag}.op 未知「${v.op}」（可选：${VERIFY_OPS.join("|")}）`); continue; }
-      if (v.op === "text" && typeof v.expect !== "string") at(`${tag}.expect 必填`);
-      if (v.op === "exists" && typeof v.sel !== "string") at(`${tag}.sel 必填`);
-      if (v.op === "navigate" && typeof v.hash !== "string") at(`${tag}.hash 必填`);
-    }
-  }
-  if (action.entry !== undefined) {
-    const e = action.entry;
-    if (typeof e.url !== "string" || !e.url) at("actions[].entry.url 必填");
-  }
+  if (typeof action.url !== "string" || !action.url) at("actions[].url 必填（可用 {param} 模板）");
   if (action.guards !== undefined) {
     const g = action.guards;
     if (!g || typeof g !== "object") at("actions[].guards 必须是对象");
@@ -132,6 +78,19 @@ function validateAction(action) {
     }
   }
   return errs;
+}
+
+// 从 title 派生稳定 id（中文保留、标点/空白→连字符），用于菜单展示与状态文件命名。
+// 不写进画像，避免 id/title 双份维护。
+function actionIdFromTitle(title) {
+  return String(title)
+    .toLowerCase()
+    // 标点、空白、括号 → 连字符
+    .replace(/[（）()<>：:、，,。！？!?""''「」【】\[\]\/\\|&*+=%$#@~^`\s]+/g, "-")
+    // 其余非字母数字字符（含中文）保留
+    .replace(/[^a-z0-9\u4e00-\u9fa5-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48) || "action";
 }
 
 // 本地日期串（护栏日计数用，按本机时区）。
@@ -486,8 +445,8 @@ function formatActionMenu(profile) {
   return actions
     .map((a) => {
       const side = (a.guards || {}).side_effect || "local";
-      const p = Object.keys(a.params || {}).join(", ") || "—";
-      return `${a.id}  ${a.title || ""}\n    side_effect=${side}  params: ${p}`;
+      const id = actionIdFromTitle(a.title);
+      return `${id}  ${a.title || ""}\n    side_effect=${side}  url: ${a.url}`;
     })
     .join("\n");
 }
@@ -505,25 +464,25 @@ async function main(argv) {
     console.log(formatActionMenu(profile));
     process.exit(0);
   }
-  const action = (profile.actions || []).find((a) => a.id === actionId);
+  const action = (profile.actions || []).find(
+    (a) => actionIdFromTitle(a.title) === actionId,
+  );
   if (!action) {
-    const have = (profile.actions || []).map((a) => a.id).join(", ") || "（无）";
+    const have = (profile.actions || []).map((a) => actionIdFromTitle(a.title)).join(", ") || "（无）";
     console.error(`画像 ${domain} 里没有 action「${actionId}」（现有：${have}；\`list\` 可查全菜单）`);
     console.error(CRYSTALLIZE_HINT);
     process.exit(1);
   }
 
-  // 参数校验：params 声明的必填项必须都给了（模板展开还会兜底查一遍）。
   const errs = validateAction(action);
   if (errs.length) {
     console.error("action 校验失败：\n  " + errs.join("\n  "));
     process.exit(1);
   }
-  const missing = Object.keys(action.params || {}).filter((k) => !params[k]);
-  if (missing.length) {
-    console.error("缺参数：" + missing.map((k) => `--param ${k}=?（${action.params[k] || ""}）`).join(" "));
-    process.exit(1);
-  }
+
+  // 参数声明来自 url 里的 {param} 模板（不再要求独立的 params 字段）。
+  const declared = new Set((action.url.match(/{([a-zA-Z0-9_]+)}/g) || []).map((t) => t.slice(1, -1)));
+  const missing = [...declared].filter((k) => !params[k]);
 
   // 护栏状态与检查。--dry 永不执行也不拦截退出码：它只如实展示「真跑会被什么拦」，
   // 拦截决定发生在真跑分支（--yes/interval/cap 在那里硬拦）。
@@ -532,67 +491,45 @@ async function main(argv) {
   const guard = checkGuards(action, state, new Date(), { yes });
   if (dry) {
     console.log("== dry 计划 ==");
-    console.log(JSON.stringify({ domain, actionId, params, guards: action.guards || {}, guard }, null, 2));
+    console.log(JSON.stringify({ domain, actionId, params, url: action.url, guards: action.guards || {}, guard, missingParams: missing }, null, 2));
     if (!guard.ok) {
       console.log("注意：按当前状态真跑会被拦 ——\n  " + guard.reasons.join("\n  "));
     }
-    for (const [i, st] of action.steps.entries()) {
-      const rendered = { ...st };
-      if (typeof rendered.value === "string") rendered.value = expandParams(rendered.value, params);
-      console.log(`  step ${i}: ${JSON.stringify(rendered)}`);
-    }
-    for (const v of action.verify || []) console.log(`  verify: ${JSON.stringify(v)}`);
     if (state) console.log("状态: " + JSON.stringify(state));
     process.exit(0);
+  }
+  if (missing.length) {
+    console.error("缺参数：" + missing.map((k) => `--param ${k}=?`).join(" "));
+    process.exit(1);
   }
   if (!guard.ok) {
     console.error("护栏拦截：\n  " + guard.reasons.join("\n  "));
     process.exit(2);
   }
 
-  // 展开（steps 里的 {param} → 实值；never 词表挂到步骤上供点击护栏读）。
-  const steps = action.steps.map((st) => ({
-    ...st,
-    _value: typeof st.value === "string" ? expandParams(st.value, params) : st.value,
-    _url: typeof st.url === "string" ? expandParams(st.url, params) : st.url,
-    _neverWords: (action.guards && action.guards.never) || [],
-  }));
-
+  const neverWords = (action.guards && action.guards.never) || [];
   const browser = await connect(session ? { session } : {});
   const trace = [];
   try {
-    // entry.url 同样展开 {param}（douyin /video/{id}、upwork ?q={query} 式参数化入口）。
-    const entry = { ...resolveEntry(action, domain) };
-    entry.url = expandParams(entry.url, params);
+    const url = expandParams(action.url, params);
+    const entry = { url, waitMs: 8000 };
     const { tabId, reused } = await findOrOpenTab(browser, entry);
-    log(`tab ${tabId}${reused ? "（复用）" : "（新开）"} ← ${entry.url}`);
+    log(`tab ${tabId}${reused ? "（复用）" : "（新开）"} ← ${url}`);
 
     const started = Date.now();
-    for (const [i, st] of steps.entries()) {
-      try {
-        const r = await execStep(browser, tabId, st, 15000);
-        trace.push({ step: i, do: st.do, sel: st.sel || st.ms, ok: true, skipped: !!r.skipped });
-        log(`step ${i} ${st.do}${r.skipped ? "（unless 跳过）" : ""} ✓ ${(st.note || "").slice(0, 40)}`);
-      } catch (e) {
-        e.stepIndex = i;
-        throw e;
-      }
-    }
-    await runVerify(browser, tabId, action.verify, params, 15000);
+    log("导航 ✓");
 
-    // 只有 verify 全过才计数（护栏的间隔/日上限以成功为准）。
+    // 只有导航成功才计数（护栏的间隔/日上限以成功为准）。
     const next = bumpState(state, params);
     fs.mkdirSync(path.dirname(sFile), { recursive: true });
     fs.writeFileSync(sFile, JSON.stringify(next, null, 2) + "\n", "utf8");
     log(`成功（${Date.now() - started}ms），状态已记 ${path.basename(sFile)}`);
     console.log(JSON.stringify({ ok: true, tabId, elapsedMs: Date.now() - started }, null, 2));
   } catch (e) {
-    // 失败不计数、不写状态。带 trace 输出，给 agent 接管留上下文。
     const out = {
       ok: false,
       error: e.message,
       code: e.code || "ACTION_FAILED",
-      failedStep: e.stepIndex,
       trace,
       on_fail: action.on_fail || "agent 即席接管完成本次任务，然后修订画像里的 action 数据（选择器漂移/流程变化）",
     };
@@ -630,6 +567,7 @@ module.exports = {
   loadState,
   resolveEntry,
   parseArgv,
+  actionIdFromTitle,
   formatActionMenu,
   STEP_OPS,
   TYPE_MODES,

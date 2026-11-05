@@ -124,25 +124,18 @@ test("buildDraftSkeleton: knowledge draft with embedded snapshot (no code fields
     observations: { loginRequired: false, limits: { pagesVisited: 1 } },
     snapshot,
   });
-  assert.equal(d.schemaVersion, 3); // 纯数据版：recipes/replay 已不存在
+  // New skeleton: snapshot/discovery/digest removed from output.
+  assert.equal(d.schemaVersion, 3);
   assert.equal(d.status, "draft");
   assert.ok(!("recipes" in d) && !("replay" in d), "画像不得含采集代码字段");
   assert.deepEqual(d.fieldMap, {});
-  assert.equal(d.pageNotes, "");
-  // 采集快照进画像（无独立材料包）
-  assert.equal(d.snapshot, snapshot);
-  assert.equal(d.discovery.visitedCount, 1);
-  assert.equal(d.discovery.skippedCount, 1);
-  assert.ok(!("report" in d.discovery), "discovery 块不得残留材料包路径");
-  // digest 目录段：只承载各段规模，不承载业务信号
-  assert.equal(d.digest.pages, 1);
-  assert.equal(d.digest.interactive, 0); // outline 为空
-  assert.equal(d.digest.responseBodies.returned, 0);
-  assert.equal(typeof d.digest.snapshotKb, "number");
-  assert.ok(
-    !("topApis" in d.digest) && !("routes" in d.digest) && !("dangerousLabels" in d.digest),
-    "digest 收窄为目录档：接口家底/危险词仍由 LLM 进 snapshot 段自己看"
-  );
+  assert.deepEqual(d.pageNotes, []);
+  // Snapshot and discovery not in skeleton - removed.
+  assert.ok(!("snapshot" in d), "snapshot removed from skeleton");
+  assert.ok(!("discovery" in d), "discovery removed from skeleton");
+  assert.ok(!("digest" in d), "digest removed from skeleton");
+  assert.ok(!("actions" in d) || Array.isArray(d.actions), "actions start empty");
+  assert.ok(!("pending" in d) || Array.isArray(d.pending), "pending start empty");
 });
 
 test("buildSnapshot: 只留可交互元素，跨页框架归并 chrome，links/controls 不入画像", () => {

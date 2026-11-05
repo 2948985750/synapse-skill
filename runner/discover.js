@@ -175,15 +175,12 @@ function buildDigest(snapshot) {
   };
 }
 
-function buildDraftSkeleton({ domain, entry, visited, observations, snapshot }) {
+function buildDraftSkeleton({ domain, entry, visited, observations }) {
   const today = new Date().toISOString().slice(0, 10);
   return {
     schemaVersion: 3,
     domain,
-    siteName: domain,
-    goal: "（draft）discover.js 站点发现骨架：采集快照（snapshot，仅可交互元素 + 站点框架归并）与路由/入口/limits 已填，知识字段（fieldMap/params/pageNotes/antiScrape）待 agent 依 snapshot 补全。先读 digest 段再按需开 snapshot。",
     status: "draft",
-    digest: buildDigest(snapshot),
     createdAt: today,
     updatedAt: today,
     access: {
@@ -191,23 +188,15 @@ function buildDraftSkeleton({ domain, entry, visited, observations, snapshot }) 
         required: observations.loginRequired,
         note: observations.loginNote || "由 discover 运行观察得出",
       },
-      session: "复用真实浏览器会话，经 CDP 桥；不伪造请求头、不重放鉴权",
       entryUrl: entry,
     },
     limits: observations.limits || {},
     antiScrape: [],
     fieldMap: {},
-    pageNotes: "",
-    params: {},
-    flows: [],
-    // 采集快照：仅可交互元素（sig/text/interactive）与可点容器；跨页重复的
-    // 站点框架归并在 chrome 一份。画像本身就是采集产物，无独立材料包。
-    snapshot,
-    discovery: {
-      entry,
-      visitedCount: visited.length,
-      skippedCount: (snapshot.skipped || []).length,
-    },
+    pageNotes: [],
+    actions: [],
+    pending: [],
+    goal: "站点画像采集完成",
   };
 }
 
@@ -531,6 +520,7 @@ const ALLOWED_FLAGS = new Set([
   "--session",
   "--force",
   "--keep-tab",
+  "--capture",
 ]);
 
 async function discoverRun(argv, deps = {}) {
@@ -538,7 +528,7 @@ async function discoverRun(argv, deps = {}) {
   if (!urlText) {
     console.error(
       "用法: discover.js --url <入口> [--dwell-ms 4000] [--settle-ms 2500] [--session sid]\n" +
-        "      [--force] [--keep-tab]",
+        "      [--force] [--keep-tab] [--capture]"
     );
     return 1;
   }
@@ -567,6 +557,9 @@ async function discoverRun(argv, deps = {}) {
   const session = getOpt(argv, "--session", "");
   const keepTab = argv.includes("--keep-tab");
   const force = argv.includes("--force");
+  // 接口采集是按需行为（用户点名才抓），不是一股脑全抓：默认关闭，
+  // 只在 --capture 时跑，且只记 url + 中文用途说明（见 pageNotes 的接口记录约定）。
+  const doCapture = argv.includes("--capture");
 
   // 位置完全由程序决定：没有位置旗标，agent 无权指定保存位置。
   // 采集结果直接写进画像（快照在 snapshot 段）——不存在独立的"材料包"。
@@ -699,7 +692,7 @@ async function discoverRun(argv, deps = {}) {
       });
     }
 
-    if (!crossOrigin) {
+    if (!crossOrigin && doCapture) {
       try {
         const cap = await browser.call("capture", { tabId, action: "wait" });
         // 响应体随页进画像 snapshot（原独立 captures/ 文件取消）。
@@ -723,17 +716,15 @@ async function discoverRun(argv, deps = {}) {
         note: "单页富快照；页间跳转/路由由 LLM 交互观测补全（discover 不再自动跟链接）",
       },
     };
-    const snapshot = buildSnapshot([page], { skipped });
     const draft = buildDraftSkeleton({
       domain,
       entry,
       visited: [entry],
       observations,
-      snapshot,
     });
     fs.mkdirSync(path.dirname(draftPath), { recursive: true });
     // draft 是纯数据画像（.json）：采集快照在 snapshot 段，知识字段（fieldMap/
-    // params/pageNotes/antiScrape）由 agent 依 snapshot 补全；没有任何代码。
+    // pageNotes/antiScrape）由 agent 依 snapshot 补全；没有任何代码。
     // 原子写（同目录 tmp + rename，与 agent/lib/json-store 同纪律）：半写坏的
     // draft 会让下次"已存在拒绝"卡在损坏文件上。
     const tmpPath = draftPath + "." + process.pid + ".tmp";
@@ -759,7 +750,7 @@ async function discoverRun(argv, deps = {}) {
           responseBodies: bodyCount,
         },
         draft: draftPath,
-        note: "单页富快照（含 SPA 跳转容器）已写入 draft.snapshot；页间跳转与路由由 LLM 交互观测补全，知识字段（fieldMap/params/pageNotes/antiScrape）由 agent 依 snapshot 补全（见 SKILL.md「画像生产」）",
+        note: "单页富快照（含 SPA 跳转容器）已写入 draft.snapshot；页间跳转与路由由 LLM 交互观测补全，知识字段（fieldMap/pageNotes/antiScrape）由 agent 依 snapshot 补全（见 SKILL.md「画像生产」）",
       }),
     );
     return 0;
