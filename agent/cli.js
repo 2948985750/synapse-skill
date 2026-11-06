@@ -1,6 +1,7 @@
 "use strict";
 // cli：参数解析与命令构造（不碰网络；params 支持 @file，其余仍是纯函数，便于单测）。
 const fs = require("fs");
+const { validateUploadFiles } = require("./files");
 const { renderUsage } = require("./commands");
 const { buildGestureExpr, isAsyncAct } = require("./gestures");
 
@@ -37,7 +38,7 @@ function parseArgs(argv) {
   let filter = "";
   let bodyMaxKb = 200;
   let all = false;
-  // snapshot/click-el/type-el 选项
+  // collect-elements/click-el/type-el 选项
   let snapMax = 50;
   let clear = false;
   let label = "";
@@ -49,10 +50,12 @@ function parseArgs(argv) {
   let sync = false;
   // --nowait：open/navigate 不等 load（扩展端默认等 15s，T-30 修复）。
   let nowait = false;
-  // 多会话（T-33）：--session <sid> 指定/偏好桥注册表条目（等价 env WB_SESSION）；
+  // 多会话：--session <sid> 严格限定桥注册表条目（等价 env WB_SESSION）；
   // --shared（仅 serve）额外写 data/bridge.json 兼容遗留脚本。
-  // doctor（T-34）：--force 跳过礼貌等待直接进硬刷协调；--dry 只打印硬刷计划。
+  // doctor：--force 跳过等待；--dry 只快查，不执行恢复操作。
   let session = "";
+  let allowFailover = false;
+  let browserId = "";
   let shared = false;
   let force = false;
   let forceKill = false;
@@ -69,7 +72,7 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === "--wait") waitMs = Number(argv[++i]) || waitMs;
     else if (a === "--keep") keep = true;
-    else if (a === "--duration") durationMs = Number(argv[++i]) || durationMs;
+    else if (a === "--duration") durationMs = Number(argv[++i]);
     else if (a === "--filter") filter = argv[++i] || "";
     else if (a === "--body-max") bodyMaxKb = Number(argv[++i]) || bodyMaxKb;
     else if (a === "--all") all = true;
@@ -95,7 +98,15 @@ function parseArgs(argv) {
     else if (a === "--client-id") clientId = argv[++i] || "";
     else if (a === "--sync") sync = true;
     else if (a === "--nowait") nowait = true;
-    else if (a === "--session") session = argv[++i] || "";
+    else if (a === "--session") {
+      session = argv[++i];
+      if (!session || session.startsWith("--")) throw codedError("VALIDATION", "--session requires a session id");
+    }
+    else if (a === "--allow-failover") allowFailover = true;
+    else if (a === "--browser-id") {
+      browserId = argv[++i];
+      if (!browserId || browserId.startsWith("--")) throw codedError("VALIDATION", "--browser-id requires an identity from diag");
+    }
     else if (a === "--shared") shared = true;
     else if (a === "--force") force = true;
     else if (a === "--force-kill") forceKill = true;
@@ -123,6 +134,8 @@ function parseArgs(argv) {
     sync,
     nowait,
     session,
+    allowFailover,
+    browserId,
     shared,
     force,
     forceKill,
@@ -141,7 +154,7 @@ function buildCmd(rest, opts = {}) {
   // el 参数两种写法都接受：
   //   click-el <tab> 3                 ← 裸索引（PowerShell/cmd 里不用碰 JSON 引号）
   //   click-el <tab> '{"i":3,...}'     ← 兼容旧写法（完整快照条目）
-    // 索引由 snapshot 给出，扩展端执行前仍会重解析校验（越界/label 漂移 → found:false）。
+    // 索引由 collect-elements 给出，扩展端执行前仍会重解析校验（越界/label 漂移 → found:false）。
     // 也接受 {"sel":"css"}：直接按 CSS 选择器定位（容器/画布等非候选节点，scroll/swipe/select-text 用）。
     function parseElArg(raw, label) {
       const text = String(raw).trim();
@@ -153,7 +166,7 @@ function buildCmd(rest, opts = {}) {
       try {
         const el = JSON.parse(text);
         if (el && typeof el.i === "number") return label ? { ...el, label } : el;
-        if (el && typeof el.sel === "string" && el.sel) return { sel: el.sel };
+        if (el && [el.sel, el.ref, el.role, el.testId].some((value) => typeof value === "string" && value)) return el;
       } catch (_) {}
       return null;
     }
@@ -194,6 +207,25 @@ function buildCmd(rest, opts = {}) {
   }
   const [cmd, ...args] = rest;
   switch (cmd) {
+    case "read-page":
+    case "wait-for": {
+      const [tabId, input] = args;
+      if (!tabId || (cmd === "wait-for" && !input)) usage();
+      let value;
+      try {
+        value = input ? JSON.parse(input.startsWith("@") ? fs.readFileSync(input.slice(1), "utf8") : input) : {};
+      } catch (cause) {
+        throw codedError("INVALID_PARAMS", cause.message);
+      }
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw codedError("INVALID_PARAMS", "expected a JSON object");
+      return { cmd, args: cmd === "wait-for" ? { tabId: Number(tabId), condition: value } : { ...value, tabId: Number(tabId) } };
+    }
+    case "click-cdp": {
+      const [tabId, input] = args;
+      const el = parseElArg(input, labelOpt);
+      if (!tabId || !el) usage();
+      return { cmd, args: { tabId: Number(tabId), el } };
+    }
     case "list":
       return { cmd: "tabs" };
     case "navigate": {
@@ -296,8 +328,7 @@ function buildCmd(rest, opts = {}) {
       // 快路径健康探测：逐个试连候选桥（详见 main / runViaBridge 里的 status 分支）
       return { cmd: "status" };
     case "doctor":
-      // 链路医生 + 多会话协调恢复（T-34）：快查 → 礼貌等待 SW 重拨 → 锁协调硬刷。
-      // 多会话统一走它做恢复，不要各自 taskkill Edge（浏览器反复关开重的来源）。
+      // 只诊断与等待重连，不修改浏览器进程或 profile。
       return { cmd: "doctor" };
     case "serve": {
       // 常驻 bridge daemon：起 WS server 并保活，注册 data/bridges/<session>.json
@@ -313,22 +344,22 @@ function buildCmd(rest, opts = {}) {
       return { cmd: "capture", args: { tabId: Number(tabId), action } };
     }
     case "setfile": {
-      const [tabId, selector, file] = args;
-      if (!tabId || !selector || !file) usage();
+      const [tabId, selector, ...files] = args;
+      if (!tabId || !selector || !files.length) usage();
       return {
         cmd: "setfile",
-        args: { tabId: Number(tabId), selector, files: [file] },
+        args: { tabId: Number(tabId), selector, files: validateUploadFiles(files) },
       };
     }
-    case "snapshot": {
+    case "collect-elements": {
       // 索引化动作空间（jev 引入）：枚举页面可交互控件为紧凑索引
       // [{i, tag, role, label}]，后续 click-el/type-el 按条目定位，免手写选择器。
       const [tabId] = args;
       if (!tabId) usage();
-      return { cmd: "snapshot", args: { tabId: Number(tabId), max: snapMax } };
+      return { cmd: "collect-elements", args: { tabId: Number(tabId), max: snapMax } };
     }
     case "click-el": {
-      // <tabId> <i|el-json|sel-json>：el = snapshot 条目 {"i":3,"tag":"button","label":"搜索"}。
+      // <tabId> <i|el-json|sel-json>：el = collect-elements 条目 {"i":3,"tag":"button","label":"搜索"}。
       // 走扩展的 `gesture` 命令（click 分支），执行前重解析（索引越界/label 漂移 → found:false 不执行）。
       const [tabId, elArg] = args;
       if (!tabId || !elArg) usage();
@@ -346,7 +377,7 @@ function buildCmd(rest, opts = {}) {
       const value = clear ? "__CLEAR__" + text : text;
       return gestureCmd("type", tabId, el, value);
     }
-    // ---- 手势族（全量交互原语）：与扩展端命令名一一对应，均基于 snapshot 索引 el{i,label}，
+    // ---- 手势族（全量交互原语）：与扩展端命令名一一对应，均基于 collect-elements 索引 el{i,label}，
     // 页内合成事件（isTrusted:false，信任级别同 click-el）。只认受信输入的站点走 cdp 通道。 ----
     case "hover-el":
     case "dblclick-el":
@@ -382,7 +413,7 @@ function buildCmd(rest, opts = {}) {
     case "scroll-el": {
       // <tabId> [<i|el-json|sel-json>] [--delta <px>] [--hscroll]：省略 el 做页面级滚动
       // （target=document.body）；--hscroll 水平轴（轮播/可滚容器）；省略 --delta 则
-      // into-view 滚入视口。el 可为 snapshot 索引或 {"sel":"css"} 直接定位容器。
+      // into-view 滚入视口。el 可为 collect-elements 索引或 {"sel":"css"} 直接定位容器。
       const [tabId, elArg] = args;
       if (!tabId) usage();
       const el = elArg !== undefined ? parseElArg(elArg, labelOpt) : null;
@@ -395,7 +426,7 @@ function buildCmd(rest, opts = {}) {
     }
     case "swipe-el": {
       // <tabId> <from-i|json> <to-i|json|sel-json>：触摸滑动（touchstart→touchmove×4→
-      // touchend）。移动端模拟/下拉刷新/触摸轮播；from/to 是 snapshot 索引或 {"sel":"css"}。
+      // touchend）。移动端模拟/下拉刷新/触摸轮播；from/to 是 collect-elements 索引或 {"sel":"css"}。
       const [tabId, fromArg, toArg] = args;
       if (!tabId || !fromArg || !toArg) usage();
       const from = parseElArg(fromArg, labelOpt);
@@ -442,7 +473,7 @@ function buildCmd(rest, opts = {}) {
     }
     case "drag-el": {
       // <tabId> <from-i|json> <to-i|json|sel-json>：HTML5 拖放（dragstart→drop→dragend
-      // 全序列，带 DataTransfer）；from/to 都是 snapshot 索引或 {"sel":"css"}
+      // 全序列，带 DataTransfer）；from/to 都是 collect-elements 索引或 {"sel":"css"}
       const [tabId, fromArg, toArg] = args;
       if (!tabId || !fromArg || !toArg) usage();
       const from = parseElArg(fromArg, labelOpt);

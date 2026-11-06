@@ -11,11 +11,14 @@
 //   writes —— 是否会产生副作用（供未来做只读校验/权限分级用）
 
 const COMMANDS = [
+  { name: "read-page", lines: ["read-page <tabId> ['<options-json>'|@file]", "按 scope 读取区域文本；maxChars 默认 4000；options 可传 contextId/sessionId。"] },
+  { name: "wait-for", lines: ["wait-for <tabId> '<condition-json>'|@file", "等待 locator 的 visible/hidden/attached/detached、text/value 或精确 url；默认 10 秒，超时不重复动作。"] },
+  { name: "click-cdp", writes: true, lines: ["click-cdp <tabId> <i|el-json>", "检查可见性、遮挡和位置稳定后发送 CDP 鼠标输入；失败不自动回退为 DOM 点击。"] },
   {
     name: "actions",
     lines: [
-      "actions <domain> <actionId|list> [--param k=v ...] [--dry] [--yes] [--draft] [--timeout ms] [--session sid]",
-      "执行结晶动作（纯数据解释器，消费侧快路径）：--dry 只打印计划永不执行；外发类（side_effect=external）真跑必须加 --yes；间隔/日上限/危险词黑名单由 runner 硬拦；list 列该域动作菜单；exit 0 成功 / 1 用法校验 / 2 护栏拦截 / 3 执行验证失败（agent 即席接管 + 结晶回写点）",
+      "actions <domain> <actionId|list> [--param k=v ...] [--dry] [--yes] [--timeout ms] [--session sid] [--browser-id id] [--allow-failover]",
+      "声明式导航入口（title+url+guards）：拒绝 draft；--dry 只打印计划，external 必须 --yes；验证加载完成与最终 URL（含 hash），exit 0 仅表示页面就绪，返回 taskSucceeded:false，不代表业务任务完成。间隔/日上限限制导航次数；never 由 agent 在交互路径遵守；list 列菜单；exit 1 用法校验 / 2 护栏拦截 / 3 导航失败",
     ],
   },
   {
@@ -50,7 +53,7 @@ const COMMANDS = [
     name: "click-el",
     lines: [
       "click-el <tabId> <i|el-json> [--label <text>]",
-      "按 snapshot 索引点击；--label 参与漂移校验（索引越界/label 变了会拒绝执行）",
+      "支持快照完整条目（含 ref）或唯一定位器 {sel,scope}/{role,name}；优先传完整条目，避免同名元素重排误点",
     ],
   },
   {
@@ -71,7 +74,7 @@ const COMMANDS = [
     name: "dblclick-el",
     lines: [
       "dblclick-el <tabId> <i|el-json> [--label <text>]",
-      "按 snapshot 索引双击：mousedown/up×2 + click(detail2) + dblclick；注意小红书/抖音等媒体卡片双击=点赞，此类站点慎用",
+      "按 collect-elements 索引双击：mousedown/up×2 + click(detail2) + dblclick；注意小红书/抖音等媒体卡片双击=点赞，此类站点慎用",
     ],
   },
   {
@@ -88,22 +91,22 @@ const COMMANDS = [
   {
     name: "discover",
     lines: [
-      "discover --url <entry> [--dwell-ms 4000] [--settle-ms 2500] [--keep-tab] [--force] [--session sid]",
-      "整站盘点（画像采集，单页富快照）：只开入口页，采全部可交互元素（含 SPA 跳转容器：cursor:pointer/onClick/role=link，不止 <a>）+ 结构 + 同源/JSON 响应体；不自动跟链接翻页——页间跳转/路由由 LLM 交互观测补全；产物唯一：<PROFILES_ROOT>/draft/<domain>.json；--force 覆盖已有 draft（整文件重写：已结晶的 actions 与知识字段一并丢失，先备份再跑）",
+      "discover --url <entry> [--dwell-ms 4000] [--settle-ms 2500] [--keep-tab] [--force] [--capture] [--session sid]",
+      "整站盘点（画像采集，单页富快照）：只开入口页，采全部可交互元素（含 SPA 跳转容器：cursor:pointer/onClick/role=link，不止 <a>）+ 结构；不自动跟链接翻页——页间跳转/路由由 LLM 交互观测补全；产物唯一：<PROFILES_ROOT>/<domain>.json，含 digest（规模目录）+ snapshot（瘦身元素快照）+ 知识骨架；--capture 默认关闭、按需抓同源/JSON 响应体；--force 覆盖已有画像（整文件重写：已结晶的 actions 与知识字段一并丢失，先备份再跑）",
     ],
   },
   {
     name: "doctor",
     lines: [
-      "doctor [--wait <ms>] [--force] [--force-kill] [--dry]",
-      "链路医生 + 多会话协调恢复：快查 → 礼貌等待 SW 重拨（探针端口/活桥，默认 --wait 60s）→ 锁协调硬刷（data/maintenance.lock.json，同一时刻只有一个会话执行 taskkill+清缓存+重启 Edge，排上的会话等锁释放后复查健康）。多会话恢复统一走 doctor，不要各自手杀 Edge；--force 跳过等待，--dry 只打印计划",
+      "doctor [--wait <ms>] [--force] [--dry]",
+      "只诊断与轮询活桥等待扩展重连（默认 60s），不杀进程、不清 profile 缓存、不重启浏览器；--force 跳过等待，--dry 只快查；--force-kill 已移除并会报错。超时报告需要人工检查目标会话与扩展",
     ],
   },
   {
     name: "drag-el",
     lines: [
       "drag-el <tabId> <from-i|json> <to-i|json>",
-      "HTML5 拖放全序列（dragstart→dragenter/dragover→drop→dragend，带 DataTransfer）；from/to 均为 snapshot 索引，目标 label 漂移会拒绝",
+      "HTML5 拖放全序列（dragstart→dragenter/dragover→drop→dragend，带 DataTransfer）；from/to 均为 collect-elements 索引，目标 label 漂移会拒绝",
     ],
   },
   {
@@ -181,7 +184,7 @@ const COMMANDS = [
     name: "scroll-el",
     lines: [
       "scroll-el <tabId> [<i|el-json|{\"sel\":\"css\"}>] [--delta <px>] [--hscroll]",
-      "滚动：省略 el 做页面级滚动（target=document.body）；--hscroll 水平轴（轮播/可滚容器）；省略 --delta 则 into-view 滚入视口；el 可为 snapshot 索引或 {\"sel\":\"css\"} 直接定位容器（overflow-x 的 div 不在 snapshot 候选里）",
+      "滚动：省略 el 做页面级滚动（target=document.body）；--hscroll 水平轴（轮播/可滚容器）；省略 --delta 则 into-view 滚入视口；el 可为 collect-elements 索引或 {\"sel\":\"css\"} 直接定位容器（overflow-x 的 div 不在 collect-elements 候选里）",
     ],
   },
   {
@@ -208,15 +211,15 @@ const COMMANDS = [
   {
     name: "setfile",
     lines: [
-      "setfile <tabId> <selector> <file-path>",
-      "给 input[type=file] 塞本地文件，走 CDP DOM.setFileInputFiles",
+      "setfile <tabId> <selector> <file-path> [file-path ...]",
+      "先检查本地普通文件，要求唯一 input[type=file]，赋值后核对 FileList；页面上传成功须另设等待条件",
     ],
   },
   {
-    name: "snapshot",
+    name: "collect-elements",
     lines: [
-      "snapshot <tabId> [--max N]",
-      "索引化动作空间：枚举可交互元素 [{i,tag,role,label}]",
+      "collect-elements <tabId> [--max N]",
+      "枚举可交互元素 [{i,tag,role,label,ref}]；ref 绑定当前文档中的节点，失效时拒绝而不回退索引",
     ],
   },
   {
@@ -230,7 +233,7 @@ const COMMANDS = [
     name: "swipe-el",
     lines: [
       "swipe-el <tabId> <from-i|json> <to-i|json|sel-json>",
-      "触摸滑动（touchstart→touchmove×4→touchend）：移动端模拟/下拉刷新/触摸轮播；from/to 是 snapshot 索引或 {\"sel\":\"css\"}",
+      "触摸滑动（touchstart→touchmove×4→touchend）：移动端模拟/下拉刷新/触摸轮播；from/to 是 collect-elements 索引或 {\"sel\":\"css\"}",
     ],
   },
   {
@@ -244,14 +247,14 @@ const COMMANDS = [
     name: "type-el",
     lines: [
       "type-el <tabId> <i|el-json> <text> [--clear] [--label <text>]",
-      "按索引键入，兼容受控组件（native value setter + input/change 事件）；--clear 先清空；<i> 来自 snapshot 条目，旧的完整 JSON 写法仍兼容",
+      "按索引键入，兼容受控组件（native value setter + input/change 事件）；--clear 先清空；<i> 来自 collect-elements 条目，旧的完整 JSON 写法仍兼容",
     ],
   }
 ];
 
 const FOOTER = [
-  "选项: --wait <ms>  --keep  --max <N>  --clear  --label <text>  --param k=v  --sync  --nowait  --client-id <id>  --trigger-js <expr>  --session <sid>  --shared  --force  --force-kill  --dry  --hold <ms>  --delta <px>  --modifiers <ctrl,shift|0-15>  --hscroll",
-  "多会话变量: WB_SESSION=<sid>（本会话 one-shot 优先走 data/bridges/<sid>.json）；--keep 也会注册为临时会话桥（注册表条目 + 允许多客户端），供同会话后续 one-shot 毫秒级复用",
+  "选项: --wait <ms>  --keep  --max <N>  --clear  --label <text>  --param k=v  --sync  --nowait  --client-id <id>  --trigger-js <expr>  --session <sid>  --browser-id <id>  --allow-failover  --shared  --force  --dry  --hold <ms>  --delta <px>  --modifiers <ctrl,shift|0-15>  --hscroll",
+  "目标选择: --session/WB_SESSION 严格限定会话，失联报 NO_BRIDGE；只有 --allow-failover 显式允许跨会话。--browser-id/WB_BROWSER_ID 在业务命令前校验 diag.browserId，不匹配报 BROWSER_MISMATCH；--keep 注册临时会话桥。browserId 仅用于本机路由校验，不是身份认证凭据",
 ];
 
 const NAMES = COMMANDS.map((c) => c.name);

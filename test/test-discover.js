@@ -1,6 +1,6 @@
 "use strict";
 // discover.js 纯函数单测（浏览器无关）。真浏览器的发现流程归 live 测试管，
-// 这里锁住的是：危险词、URL 归一、路由聚类、draft 骨架、探针整形、响应剔除。
+// 这里锁住的是：危险词、URL 归一、路由聚类、画像骨架、探针整形、响应剔除。
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { isInside } = require("../agent/paths");
@@ -8,7 +8,7 @@ const {
   isDangerousLabel,
   normalizeUrl,
   clusterByPathPrefix,
-  buildDraftSkeleton,
+  buildProfileSkeleton,
   buildSnapshot,
   pruneStructure,
   pruneCapture,
@@ -29,8 +29,9 @@ test("isDangerousLabel: CJK includes, ASCII word-boundary, false positives stay 
   assert.equal(isDangerousLabel(""), null);
 });
 
-test("normalizeUrl: strips hash, keeps query, rejects non-http", () => {
-  assert.equal(normalizeUrl("https://a.com/x?y=1#frag"), "https://a.com/x?y=1");
+test("normalizeUrl: keeps hash routes and query, rejects non-http", () => {
+  assert.equal(normalizeUrl("https://a.com/x?y=1#frag"), "https://a.com/x?y=1#frag");
+  assert.equal(normalizeUrl("https://a.com/#/compose"), "https://a.com/#/compose");
   assert.equal(normalizeUrl("https://a.com"), "https://a.com/");
   assert.equal(normalizeUrl("javascript:void(0)"), null);
   assert.equal(normalizeUrl("mailto:a@b.c"), null);
@@ -99,7 +100,7 @@ test("shapeClickables: dedup, drops empties, caps, keeps href", () => {
 
 test("isInside: containment guard rejects escape and cross-drive, accepts equal and nested", () => {
   const root = "D:\\repo\\profiles";
-  assert.equal(isInside(root, "D:\\repo\\profiles\\draft\\a.json"), true);
+  assert.equal(isInside(root, "D:\\repo\\profiles\\a.json"), true);
   assert.equal(isInside(root, "D:\\repo\\profiles"), true); // 等于锚本身允许
   assert.equal(isInside(root, "D:\\repo\\profiles-other\\a.json"), false); // 前缀相同不是包含
   assert.equal(isInside(root, "D:\\repo\\a.json"), false);
@@ -107,35 +108,54 @@ test("isInside: containment guard rejects escape and cross-drive, accepts equal 
   assert.equal(isInside("C:\\data", "D:\\data\\x.json"), false); // 跨盘符
   // ".." 逃逸：path.relative 先归一再判包含，profiles\..\secret.json == repo\secret.json
   assert.equal(isInside(root, "D:\\repo\\profiles\\..\\secret.json"), false);
-  assert.equal(isInside(root, "D:\\repo\\profiles\\draft\\..\\x.json"), true); // 归一后仍在锚内
+  assert.equal(isInside(root, "D:\\repo\\profiles\\.\\x.json"), true); // "." 归一后仍在锚内
 });
 
-test("buildDraftSkeleton: knowledge draft with embedded snapshot (no code fields)", () => {
+test("buildProfileSkeleton: knowledge profile with embedded snapshot (no code fields)", () => {
   const snapshot = {
     capturedAt: "2026-10-26T00:00:00.000Z",
     chrome: { outline: [], clickables: [] },
-    pages: [{ url: "https://a.com/", outline: [], clickables: [] }],
+    pages: [
+      {
+        url: "https://a.com/",
+        outline: [{ sig: "A", text: "首页", interactive: true }],
+        clickables: [{ sig: "DIV.card", text: "卡片" }],
+        structure: { forms: [{ action: "/x" }], lists: [{ count: 3 }] },
+        capture: { requests: [{ url: "https://a.com/api", body: '{"k":1}' }] },
+      },
+    ],
     skipped: [{ url: "https://b.com/", reason: "cross-origin" }],
   };
-  const d = buildDraftSkeleton({
+  const d = buildProfileSkeleton({
     domain: "a.com",
     entry: "https://a.com/",
     visited: ["https://a.com/"],
     observations: { loginRequired: false, limits: { pagesVisited: 1 } },
     snapshot,
   });
-  // New skeleton: snapshot/discovery/digest removed from output.
   assert.equal(d.schemaVersion, 3);
   assert.equal(d.status, "draft");
   assert.ok(!("recipes" in d) && !("replay" in d), "画像不得含采集代码字段");
   assert.deepEqual(d.fieldMap, {});
   assert.deepEqual(d.pageNotes, []);
-  // Snapshot and discovery not in skeleton - removed.
-  assert.ok(!("snapshot" in d), "snapshot removed from skeleton");
-  assert.ok(!("discovery" in d), "discovery removed from skeleton");
-  assert.ok(!("digest" in d), "digest removed from skeleton");
-  assert.ok(!("actions" in d) || Array.isArray(d.actions), "actions start empty");
-  assert.ok(!("pending" in d) || Array.isArray(d.pending), "pending start empty");
+  assert.ok(Array.isArray(d.actions), "actions start empty");
+  assert.ok(Array.isArray(d.pending), "pending start empty");
+  // 采集快照进画像（无独立材料包）——1a9f12e 曾误删此接线，这里钉死
+  assert.equal(d.snapshot, snapshot);
+  assert.ok(!("discovery" in d), "discovery 中间块不入画像");
+  // digest 目录段：只承载各段规模，不承载业务信号
+  assert.equal(d.digest.pages, 1);
+  assert.equal(d.digest.interactive, 1);
+  assert.equal(d.digest.clickables, 1);
+  assert.equal(d.digest.forms, 1);
+  assert.equal(d.digest.lists, 1);
+  assert.equal(d.digest.responseBodies.returned, 1);
+  assert.equal(typeof d.digest.snapshotKb, "number");
+  assert.deepEqual(
+    Object.keys(d.digest).sort(),
+    ["clickables", "forms", "interactive", "lists", "pages", "responseBodies", "snapshotKb"],
+    "digest 收窄为目录档：接口家底/危险词/跳过记录仍由 LLM 进 snapshot 段自己看",
+  );
 });
 
 test("buildSnapshot: 只留可交互元素，跨页框架归并 chrome，links/controls 不入画像", () => {
@@ -248,7 +268,7 @@ test("jsonShapeOf: 数组取首条记录形状，超 24 键截断", () => {
   assert.equal(Object.keys(jsonShapeOf(many).keys).length, 24);
 });
 
-test("discoverRun: 位置旗标（--out-dir/--draft）显式拒绝，不静默忽略", async () => {
+test("discoverRun: 位置旗标（--out-dir/--profile）显式拒绝，不静默忽略", async () => {
   const { main } = require("../runner/discover");
   const origError = console.error;
   let logged = "";
@@ -259,9 +279,9 @@ test("discoverRun: 位置旗标（--out-dir/--draft）显式拒绝，不静默�
     assert.equal(code1, 1);
     assert.match(logged, /不接受的参数: --out-dir/);
     logged = "";
-    const code2 = await main(["--url", "https://example.com/", "--draft", "D:/tmp/x.json"]);
+    const code2 = await main(["--url", "https://example.com/", "--profile", "D:/tmp/x.json"]);
     assert.equal(code2, 1);
-    assert.match(logged, /不接受的参数: --draft/);
+    assert.match(logged, /不接受的参数: --profile/);
   } finally {
     console.error = origError;
   }

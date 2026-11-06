@@ -5,6 +5,7 @@ const { WebSocketServer, WebSocket } = require("./vendor/ws");
 const { authenticateClient, authenticateServer } = require("./bridge-auth");
 const { failReply, failEvaluation } = require("./lib/ui");
 const { doCaptureMany } = require("./capture");
+const { CODES, isRetryable } = require("./err-codes");
 const {
   PORT_RANGE_START,
   PORT_RANGE_END,
@@ -44,6 +45,17 @@ const CHAIN_DEADLINE_MS = 15000;
 // 用一次短超时 diag 探活，探不到就换下一个候选。
 const EXT_PROBE_TIMEOUT_MS = 1500;
 
+async function assertBrowserIdentity(channel, opts = {}, timeoutMs = EXT_PROBE_TIMEOUT_MS) {
+  const expected = opts.browserId || process.env.WB_BROWSER_ID;
+  if (!expected) return;
+  const diag = failReply(await channel.sendCmd({ cmd: "diag" }, timeoutMs));
+  if (diag?.browserId !== expected) {
+    const error = new Error("Browser identity mismatch: expected " + expected + ", got " + (diag?.browserId || "unavailable"));
+    error.code = "BROWSER_MISMATCH";
+    throw error;
+  }
+}
+
 async function connectBridgeChain(candidates, token, opts, timeoutMs = 5000) {
   let lastError = null;
   const deadline = Date.now() + (opts.chainDeadlineMs || CHAIN_DEADLINE_MS);
@@ -59,7 +71,7 @@ async function connectBridgeChain(candidates, token, opts, timeoutMs = 5000) {
         try {
           await channel.sendCmd(
             { cmd: "diag" },
-            Math.min(EXT_PROBE_TIMEOUT_MS, Math.max(300, deadline - Date.now())),
+            Math.min(EXT_PROBE_TIMEOUT_MS, Math.max(1, deadline - Date.now())),
           );
         } catch (probeError) {
           alive =
@@ -73,6 +85,7 @@ async function connectBridgeChain(candidates, token, opts, timeoutMs = 5000) {
           continue;
         }
       }
+      await assertBrowserIdentity(channel, opts, Math.max(1, Math.min(EXT_PROBE_TIMEOUT_MS, deadline - Date.now())));
       return { channel, bridge: b };
     } catch (error) {
       lastError = error;
@@ -83,6 +96,7 @@ async function connectBridgeChain(candidates, token, opts, timeoutMs = 5000) {
       }
     }
   }
+  if (lastError?.code === "BROWSER_MISMATCH") throw lastError;
   const error = new Error(
     lastError
       ? "No live bridge reachable (" +
@@ -99,6 +113,10 @@ async function connectBridgeChain(candidates, token, opts, timeoutMs = 5000) {
 function createChannel(socket, opts) {
   const pending = new Map();
   const eventsByCapture = new Map();
+  // 平行的丢弃计数（Map captureId -> 条数）：事件缓冲按 captureId 各限 2000 条，
+  // 超限 shift 最旧事件时在此记账，capture 整形阶段把它翻成
+  // truncated/droppedEventCount，调用方不再把"被截断"误当"捕获完整"。
+  const droppedByCapture = new Map();
   const clientId = opts.clientId;
   function settle(id, error, reply) {
     const entry = pending.get(id);
@@ -122,6 +140,12 @@ function createChannel(socket, opts) {
     } catch (_) {
       return;
     }
+    // 心跳应答（F-6.1 双向）：扩展每 20s 发 ping；不回 pong 的话扩展侧
+    // 的 liveness 信号就流不回来，半开连接两边都发现不了。
+    if (message.type === "ping") {
+      socket.send(JSON.stringify({ type: "pong", ts: message.ts }));
+      return;
+    }
     if (message.type === "agent.result") {
       if (message.ok) settle(message.id, null, message);
       else {
@@ -136,7 +160,13 @@ function createChannel(socket, opts) {
         eventsByCapture.set(message.captureId, events);
       }
       events.push(message);
-      if (events.length > 2000) events.shift();
+      if (events.length > 2000) {
+        events.shift();
+        droppedByCapture.set(
+          message.captureId,
+          (droppedByCapture.get(message.captureId) || 0) + 1,
+        );
+      }
     }
   }
   socket.on("message", onMessage);
@@ -168,6 +198,7 @@ function createChannel(socket, opts) {
             cmd: obj.cmd,
             args: obj.args,
             clientId,
+            browserId: opts.browserId || process.env.WB_BROWSER_ID || undefined,
             transientClient: opts.transientClient,
             timeoutMs,
             deadlineAt: Date.now() + timeoutMs,
@@ -217,7 +248,7 @@ function createChannel(socket, opts) {
       });
     }
   }
-  return { sendCmd, eventsByCapture, close };
+  return { sendCmd, eventsByCapture, droppedByCapture, close };
 }
 
 async function connectBridge(b, token, opts, timeoutMs = 5000) {
@@ -276,6 +307,7 @@ async function connectDirect(token, opts) {
       for (const peer of srv.clients) peer.terminate();
       await new Promise((resolve) => srv.close(resolve));
     };
+    await assertBrowserIdentity(channel, opts);
     return channel;
   } catch (error) {
     clearTimeout(timer);
@@ -285,7 +317,16 @@ async function connectDirect(token, opts) {
   }
 }
 
-async function executeCommand(channel, command, opts) {
+async function executeCommand(channel, command, opts = {}) {
+  const deadline = opts.commandTimeoutMs == null ? null : Date.now() + opts.commandTimeoutMs;
+  if (deadline != null && (!Number.isFinite(opts.commandTimeoutMs) || opts.commandTimeoutMs <= 0)) {
+    throw Object.assign(new Error("commandTimeoutMs must be positive and finite"), { code: "VALIDATION" });
+  }
+  await assertBrowserIdentity(channel, opts, deadline == null ? EXT_PROBE_TIMEOUT_MS : Math.min(EXT_PROBE_TIMEOUT_MS, opts.commandTimeoutMs));
+  const remaining = deadline == null ? undefined : deadline - Date.now();
+  if (remaining != null && remaining <= 0) {
+    throw Object.assign(new Error("Command deadline exceeded during identity verification"), { code: "COMMAND_TIMEOUT" });
+  }
   if (command.cmd === "capture")
     return (
       await doCaptureMany(
@@ -293,6 +334,7 @@ async function executeCommand(channel, command, opts) {
         [command.args],
         opts,
         channel.eventsByCapture,
+        channel.droppedByCapture,
       )
     )[0];
   if (command.cmd === "capture-many")
@@ -301,9 +343,10 @@ async function executeCommand(channel, command, opts) {
       command.args.pairs,
       opts,
       channel.eventsByCapture,
+      channel.droppedByCapture,
     );
-  const result = failReply(await channel.sendCmd(command));
-  if (command.cmd === "cdp" && command.args?.method === "Runtime.evaluate")
+  const result = failReply(await channel.sendCmd(command, remaining));
+  if (command.cmd === "cdp")
     failEvaluation(result);
   return result;
 }
@@ -314,5 +357,11 @@ module.exports = {
   connectBridge,
   connectDirect,
   connectBridgeChain,
+  assertBrowserIdentity,
   executeCommand,
+  // 错误码体系（FEATURE 1）：ok:false 回复带 code 字段（扩展侧附或 classifyError
+  // 推断）；缺省回退 "COMMAND_FAILED" 保持。isRetryable/CODES 转供调用方
+  // 区分可重试（锁/CDP 超时）与永久性失败，不必解析错误文案。
+  isRetryable,
+  CODES,
 };

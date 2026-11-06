@@ -18,7 +18,7 @@ const GESTURE_ACTS = new Set([
 ]);
 
 // 异步手势：Runtime.evaluate 需 awaitPromise:true（扩展侧 ASYNC_GESTURES 同步）。
-const ASYNC_GESTURES = { longpress: true, key: true };
+const ASYNC_GESTURES = { longpress: true, key: true, type: true, select: true };
 
 // buildGestureExpr(act, el, value)：只校验 act 合法性并返回标准化参数包，
 // 真正的页内表达式在扩展侧构造。未知 act 在 CLI 侧就抛错，不产出坏命令。

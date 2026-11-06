@@ -10,7 +10,7 @@
 
 驱动**本机已运行、已登录**的 Chrome/Edge 做网页自动化（读渲染 DOM、点选输入、捕获页面自身 XHR/fetch 响应、复用登录态）。
 
-技术路线一句话：**浏览器装一个 MV3 扩展（synapse）做 CDP 全量透传，agent 仓在本机回环起 WS server（端口 9521–9540），扩展 service worker 主动外拨接入**。没有 `--remote-debugging-port`、没有 native messaging、没有独立服务端进程。
+技术路线一句话：**浏览器装一个 MV3 扩展（synapse）调用 chrome.debugger 支持的 CDP 域，agent 仓在本机回环起 WS server（端口 9521–9540），扩展 service worker 主动外拨接入**。没有 `--remote-debugging-port`、没有 native messaging、没有独立服务端进程。
 
 ## 2. 两个仓、三层规则（先钉住这条）
 
@@ -64,15 +64,17 @@ agent/capture.js         网络响应捕获整形 + 多标签并行
 agent/registry.js        桥发现记录（bridge.json + 多会话 bridges/<sid>.json，pid 存活判定）
 agent/config.js          常量：端口 9521–9540、CMD_TIMEOUT 50s、维护锁 TTL 3min
 agent/paths.js           根目录解析（env > config.json > 平台默认）；PROFILES_ROOT 即仓库目录
-agent/doctor.js          链路体检与恢复（唯一碰 Windows 细节：taskkill/Edge 重启/清 SW 缓存）
-agent/api.js             程序用库 connect()→browser.tabs/snapshot/click/type/cdp（绕 shell）
+agent/doctor.js          链路体检与等待重连（不杀浏览器、不清 profile、不重启）
+agent/api.js             程序用库 connect()→browser.tabs/collectElements/click/type/cdp（绕 shell）
 agent/gestures.js        L2 手势真源（见 §2 逐字同步守卫）
-profiles/                纯数据画像（无采集代码！）：*.json = reviewed，draft/*.json = 待审
-runner/discover.js       单页画像采集 → 写 profiles/draft/<domain>.json（危险词只记不点）
-runner/actions.js        结晶动作解释器（声明式 steps）；护栏硬执行：
-                         side_effect=external 必须 --yes、--dry 只打印、never 词拦截
-                         退出码：0 成功 / 1 一般错 / 2 护栏拦截 / 3 失败=agent 即席接管点
-test/                    6 个测试（npm test 串跑）
+profiles/                纯数据画像（无采集代码！）：*.json = reviewed；待审画像同目录，靠
+                         `status: draft` 字段区分（无 draft/ 子目录）
+runner/discover.js       单页画像采集 → 写 profiles/<domain>.json（危险词只记不点）
+runner/actions.js        结晶动作解释器（title+url+guards 纯数据；执行=校验→护栏→参数展开
+                         →导航→验证加载与最终 URL→记导航状态）；拒绝 draft；
+                         external 必须 --yes、--dry 只打印，never 由 agent 交互路径遵守
+                         exit 0 仅页面就绪，taskSucceeded:false；1 一般错 / 2 护栏 / 3 导航失败
+test/                    npm test 串跑，包括隔离画像、路由与运行时回归测试
 .tmp/                    scratch（结晶会话临时产物），gitignore，无视
 ```
 
@@ -85,14 +87,14 @@ cli.js gestureCmd/buildCmd → transport.connectBridgeChain（找到已连入的
   → withTabLock 内 acquireLease + ensureAttached → cdp-transport 发 Runtime.evaluate（gestures.js 生成的 IIFE）→ 结果弹回
 ```
 
-扩展端仍有具名 `click-el`/`type-el`/`setfile` case（commands.js:81/107/157），但**当前 CLI 路径无人触发，属休眠基线**：click/type 已在 11-02 迁到 CLI IIFE 通道（"扩展不 bump"架构决定）；setfile 有意留扩展（`DOM.setFileInputFiles` 属 CDP 域能力=基建）。真正活着的具名帧只有 `snapshot`、`tabs`、`navigate`、`close`、`open`、`open-frame`、`attach`/`detach`。
+扩展端仍有具名 `click-el`/`type-el`/`setfile` case（commands.js:81/107/157），但**当前 CLI 路径无人触发，属休眠基线**：click/type 已在 11-02 迁到 CLI IIFE 通道（"扩展不 bump"架构决定）；setfile 有意留扩展（`DOM.setFileInputFiles` 属 CDP 域能力=基建）。真正活着的具名帧只有 `collect-elements`、`tabs`、`navigate`、`close`、`open`、`open-frame`、`attach`/`detach`。
 
 **结晶循环**：
 
 ```
-即席采集/discover → profiles/draft/*.json（status:draft，带实测 flows）
+即席采集/discover → profiles/<domain>.json（status:draft，digest+snapshot+知识骨架）
   → 人工审阅 + 跑通任务回写 actions[] → status:reviewed 正式画像
-  → 下次同类任务走 runner/actions 快路径：--dry 核计划，exit 3 时 agent 即席接管并修复回写
+  → 下次用 runner/actions 打开入口：--dry 核计划，exit 0 仅表示导航就绪，业务结果单独验证
 ```
 
 ## 5. 跑起来 / 验证
@@ -126,4 +128,4 @@ cli.js gestureCmd/buildCmd → transport.connectBridgeChain（找到已连入的
 - discover 单页实跑验收未完成
 - 扩展仓商店 zip 落后于源码（见 §3）
 
-—— 读完本文 + 按 §4 链路走一遍 `status` → `snapshot` → `click-el` → `capture`，即可开工。
+—— 读完本文 + 按 §4 链路走一遍 `status` → `collect-elements` → `click-el` → `capture`，即可开工。

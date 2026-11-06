@@ -2,13 +2,13 @@
   "name": "synapse-skill",
   "version": "0.2.0",
   "private": true,
-  "description": "Agent-side bridge for Synapse: drive an already-running, already-logged-in Chrome/Edge from a local process over a loopback WebSocket (full CDP passthrough, per-tab FIFO, multi-session registry).",
+  "description": "Agent-side bridge for Synapse: drive an already-running, already-logged-in Chrome/Edge over a loopback WebSocket (chrome.debugger CDP domains, per-tab FIFO, strict session and browser-profile routing).",
   "type": "commonjs",
   "engines": {
     "node": ">=18"
   },
   "scripts": {
-    "test": "node test/test-bridge.js && node test/test-commands.js && node test/test-gestures.js && node test/test-regressions.js && node --test test/test-discover.js && node --test test/test-actions.js",
+    "test": "node test/test-bridge.js && node test/test-commands.js && node test/test-gestures.js && node test/test-regressions.js && node --test test/test-discover.js && node --test test/test-actions.js && node --test test/test-runtime.js",
     "test:agent": "node test/test-bridge.js",
     "test:commands": "node test/test-commands.js",
     "test:gestures": "node test/test-gestures.js",

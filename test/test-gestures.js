@@ -19,14 +19,14 @@ const { buildGestureExpr, isAsyncAct } = require("../agent/gestures");
 {
   // 稳定值（扩展侧 EL_CANDIDATE_SEL 的黄金串）
   const GOLDEN_SEL =
-    'input,button,select,textarea,a,[role="button"],[role="tab"],[role="link"],[role="menuitem"],[role="checkbox"],[role="radio"],[role="switch"],[data-testid]';
+    'input,button,select,textarea,a,[contenteditable="true"],[role="button"],[role="tab"],[role="link"],[role="menuitem"],[role="checkbox"],[role="radio"],[role="switch"],[data-testid]';
   assert.strictEqual(pa.EL_CANDIDATE_SEL, GOLDEN_SEL, "EL_CANDIDATE_SEL drifted from golden");
 
   // 结构 marker：collector 必须含 shadowRoot 递归 + 可见性过滤
   for (const marker of ["__elNodes", "shadowRoot", "getBoundingClientRect", "disabled"])
     assert.ok(pa.EL_COLLECTOR_SRC.includes(marker), "collector missing marker: " + marker);
   assert.ok(pa.ACT_QUIET_DIALOGS_SRC.includes("withQuietDialogs"), "quiet-dialogs src missing");
-  assert.ok(pa.GESTURE_GUARD_SRC.includes("label drift"), "guard missing label-drift check");
+  assert.ok(pa.GESTURE_GUARD_SRC.includes("tools.resolve(el)") && pa.EL_COLLECTOR_SRC.includes("label drift"), "guard must use the shared label-drift resolver");
 
   console.log("ALL-COLLECTOR-SYNC-OK (extension single source)");
 }
@@ -74,7 +74,10 @@ function makePage(elA, elB) {
     document: {
       activeElement: null,
       body: { getBoundingClientRect: () => ({ x: 0, y: 0, width: 0, height: 0 }) },
-      querySelectorAll() {
+      querySelectorAll(selector) {
+        if (selector === ".boxA") return [elA];
+        if (selector === ".boxB") return [elB];
+        if (selector === ".missing") return [];
         return [elA, elB];
       },
       querySelector(sel) {
@@ -162,12 +165,12 @@ function runSync(act, el, value) {
   // type：native value setter + input/change；__CLEAR__ 前缀先清空
   const inp = elStub("field", { tagName: "INPUT", value: "old" });
   const inpPage = makePage(inp, elStub("other"));
-  let tp = JSON.parse(vm.runInNewContext(pa.buildGestureExpr("type", { i: 0 }, "new"), inpPage));
+  let tp = JSON.parse(await vm.runInNewContext(pa.buildGestureExpr("type", { i: 0 }, "new"), inpPage));
   assert.strictEqual(tp.found, true);
   assert.strictEqual(inp.value, "new", "type sets the value via the native setter");
   assert.ok(inp.events.includes("input") && inp.events.includes("change"));
   inp.value = "stale";
-  tp = JSON.parse(vm.runInNewContext(pa.buildGestureExpr("type", { i: 0 }, "__CLEAR__fresh"), inpPage));
+  tp = JSON.parse(await vm.runInNewContext(pa.buildGestureExpr("type", { i: 0 }, "__CLEAR__fresh"), inpPage));
   assert.strictEqual(inp.value, "fresh", "__CLEAR__ prefix clears then types");
 
   // scroll：水平轴 + 可滚容器走 scrollLeft；sel 定位；旧纯字符串兼容
@@ -185,7 +188,7 @@ function runSync(act, el, value) {
   assert.strictEqual(car.scrollLeft, 400, "sel target resolves to the container");
   cr = JSON.parse(vm.runInNewContext(pa.buildGestureExpr("scroll", { sel: ".missing" }, ""), carPage));
   assert.strictEqual(cr.found, false);
-  assert.match(cr.reason, /sel not found/);
+  assert.strictEqual(cr.code, "ELEMENT_NOT_FOUND");
 
   // swipe：touchstart→touchmove×4→touchend；目标 label 漂移拒绝
   const sA = elStub("src");
@@ -227,6 +230,9 @@ function runSync(act, el, value) {
   assert.ok(pa.ASYNC_GESTURES.longpress);
   assert.ok(pa.ASYNC_GESTURES.key);
   assert.strictEqual(isAsyncAct("longpress"), true);
+  assert.strictEqual(isAsyncAct("type"), true);
+  assert.strictEqual(isAsyncAct("select"), true);
+  assert.deepStrictEqual(require("../agent/gestures").ASYNC_GESTURES, pa.ASYNC_GESTURES);
   assert.strictEqual(isAsyncAct("hover"), false);
 
   // 未知 act 在 CLI 侧即抛错（buildGestureExpr 校验）

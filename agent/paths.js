@@ -166,8 +166,8 @@ function describePaths() {
   };
 }
 
-// doctor 硬刷用的扩展根目录（含 manifest.json 的 unpacked 扩展）。
-// 解析顺序：WB_CDP_EXT_DIR → 同级 cdp/extension → cdp-browser/extension →
+// 解析扩展根目录（含 manifest.json 的 unpacked 扩展），不启动浏览器。
+// 解析顺序：WB_CDP_EXT_DIR → 同级 synapse/extension → cdp/extension → cdp-browser/extension →
 // ~/.dsh/skills/cdp-browser/extension → 报错
 function resolveExtDir() {
   if (process.env.WB_CDP_EXT_DIR) {
@@ -182,6 +182,7 @@ function resolveExtDir() {
     return dir;
   }
   const candidates = [
+    path.join(SKILLS_DIR, "synapse", "extension"),
     path.join(SKILLS_DIR, "cdp", "extension"),
     path.join(SKILLS_DIR, "cdp-browser", "extension"),
     path.join(os.homedir(), ".dsh", "skills", "cdp-browser", "extension"),
@@ -190,7 +191,7 @@ function resolveExtDir() {
     if (fs.existsSync(path.join(c, "manifest.json"))) return c;
   }
   throw new Error(
-    "找不到 unpacked 扩展根目录。doctor 硬刷需要 WB_CDP_EXT_DIR 指向含 manifest.json 的目录" +
+    "找不到 unpacked 扩展根目录。请让 WB_CDP_EXT_DIR 指向含 manifest.json 的目录" +
       "（候选：" +
       candidates.join(" | ") +
       "）",

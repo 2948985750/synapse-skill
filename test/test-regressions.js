@@ -129,7 +129,7 @@ test("capture only eagerly fetches bodies for candidate requests", async () => {
 });
 
 // API 入口：索引/条目两种形态。
-test("api.normalizeEl accepts an index or a snapshot entry", () => {
+test("api.normalizeEl accepts an index or a collect-elements entry", () => {
   const { normalizeEl } = require("../agent/api");
   assert.deepStrictEqual(normalizeEl(3), { i: 3 });
   assert.deepStrictEqual(normalizeEl({ i: 2, label: "x" }), { i: 2, label: "x" });
@@ -166,13 +166,21 @@ test("router caps in-flight commands per connection", () => {
   assert.equal(rejected.code, "CLIENT_BUSY");
 });
 
-// doctor 默认只杀"本工具启动的" Edge：没有 pid 记录时不应该动用户的浏览器。
-test("killOwnedEdge does nothing when we never launched a browser", (t) => {
-  if (process.platform !== "win32") return t.skip("仅 Windows");
-  const { killOwnedEdge } = require("../agent/doctor");
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "synapse-edge-"));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  assert.equal(killOwnedEdge({}, dir), "none", "没有自己的 pid 记录时必须跳过 kill");
+test("doctor stops at diagnosis without touching browser profiles", async (context) => {
+  const { runDoctor } = require("../agent/doctor");
+  const previousExitCode = process.exitCode;
+  context.after(() => { process.exitCode = previousExitCode; });
+  const replies = [];
+  for (const options of [{ force: true }, { dry: true }, { waitMs: 0 }]) {
+    const reply = await runDoctor("unused", options, {
+      probeStatusSnapshot: async () => ({ ok: false, code: "NO_BRIDGE" }),
+      emit: (value) => replies.push(value),
+    });
+    assert.deepEqual(reply.plan, { kill: false, clearCaches: false, relaunch: false });
+    assert.equal(reply.ok, false);
+  }
+  assert.equal(replies.length, 3);
+  await assert.rejects(runDoctor("unused", { forceKill: true }), /no longer kills/);
 });
 
 // 数据目录：env > config.json > 平台默认；config set 后当前配置立即生效。

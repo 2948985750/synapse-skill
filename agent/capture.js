@@ -2,17 +2,35 @@
 // capture：网络响应体捕获的结果整形与多标签编排。
 const { failReply, failEvaluation, wait } = require("./lib/ui");
 
-async function buildCaptureSessionResult(sendCmd, s, events, opts, bodyStore) {
-  const { tabId, action, captureId } = s;
-  const durationMs = opts.durationMs || 12000;
+function requestKey(captureId, requestId, sessionId) {
+  return sessionId ? JSON.stringify([captureId, sessionId, requestId]) : captureId + ":" + requestId;
+}
 
-  // 合并事件：requestId -> 请求信息（buffer 已按 captureId 分流，无需再按 tabId 过滤）
+function normalizeCaptureOptions(opts = {}) {
+  const normalized = { ...opts, durationMs: opts.durationMs == null ? 12000 : opts.durationMs };
+  if (!Number.isFinite(normalized.durationMs) || normalized.durationMs <= 0) {
+    const error = new Error("capture: durationMs must be positive and finite");
+    error.code = "VALIDATION";
+    throw error;
+  }
+  return normalized;
+}
+
+// 注意：totalRequestsSeen 只反映"存活缓冲"里看到的请求数——事件缓冲有 2000 条
+// 上限（超限 shift 掉最旧的），dropped>0 时该数字被截断，结果靠
+// truncated/droppedEventCount 两个字段如实标注，调用方不能再把截断当完整。
+async function buildCaptureSessionResult(sendCmd, s, events, opts, bodyStore, dropped = 0) {
+  const { tabId, action, captureId } = s;
+  const { durationMs } = normalizeCaptureOptions(opts);
+
+  // 合并事件：captureId + sessionId + requestId -> 请求信息。
   const reqs = new Map();
   for (const ev of events) {
     const p = ev.params || {};
     if (ev.method === "Network.requestWillBeSent") {
-      reqs.set(p.requestId, {
+      reqs.set(requestKey(captureId, p.requestId, ev.sessionId), {
         requestId: p.requestId,
+        ...(ev.sessionId ? { sessionId: ev.sessionId } : {}),
         url: p.request && p.request.url,
         method: p.request && p.request.method,
         type: p.type || "",
@@ -21,8 +39,9 @@ async function buildCaptureSessionResult(sendCmd, s, events, opts, bodyStore) {
         size: 0,
       });
     } else if (ev.method === "Network.responseReceived") {
-      const r = reqs.get(p.requestId) || {
+      const r = reqs.get(requestKey(captureId, p.requestId, ev.sessionId)) || {
         requestId: p.requestId,
+        ...(ev.sessionId ? { sessionId: ev.sessionId } : {}),
         url: p.response && p.response.url,
         method: "",
         type: "",
@@ -32,9 +51,9 @@ async function buildCaptureSessionResult(sendCmd, s, events, opts, bodyStore) {
       };
       r.status = p.response ? p.response.status : 0;
       r.mimeType = p.response ? p.response.mimeType : "";
-      reqs.set(p.requestId, r);
+      reqs.set(requestKey(captureId, p.requestId, ev.sessionId), r);
     } else if (ev.method === "Network.loadingFinished") {
-      const r = reqs.get(p.requestId);
+      const r = reqs.get(requestKey(captureId, p.requestId, ev.sessionId));
       if (r) r.size = p.encodedDataLength || p.totalBytes || 0;
     }
   }
@@ -93,14 +112,14 @@ async function buildCaptureSessionResult(sendCmd, s, events, opts, bodyStore) {
     let body = "";
     let bodyTruncated = false;
     let bodyError = "";
-    const pre = bodyStore && bodyStore.get(captureId + ":" + c.requestId);
+    const pre = bodyStore && bodyStore.get(requestKey(captureId, c.requestId, c.sessionId));
     if (pre) {
       ({ body, bodyTruncated } = decodeBody(pre.body, pre.base64Encoded));
     } else {
       const remaining = bodyDeadline - Date.now();
       if (remaining <= 0) {
         bodyError = "body fetch deadline exceeded";
-        out.push({ url: c.url, method: c.method, type: c.type, status: c.status,
+        out.push({ ...(c.sessionId ? { sessionId: c.sessionId } : {}), url: c.url, method: c.method, type: c.type, status: c.status,
           mimeType: c.mimeType, size: c.size, body, bodyTruncated, bodyError });
         continue;
       }
@@ -110,6 +129,7 @@ async function buildCaptureSessionResult(sendCmd, s, events, opts, bodyStore) {
             cmd: "cdp",
             args: {
               tabId,
+              ...(c.sessionId ? { sessionId: c.sessionId } : {}),
               method: "Network.getResponseBody",
               params: { requestId: c.requestId },
             },
@@ -129,6 +149,7 @@ async function buildCaptureSessionResult(sendCmd, s, events, opts, bodyStore) {
       }
     }
     out.push({
+      ...(c.sessionId ? { sessionId: c.sessionId } : {}),
       url: c.url,
       method: c.method,
       type: c.type,
@@ -145,7 +166,11 @@ async function buildCaptureSessionResult(sendCmd, s, events, opts, bodyStore) {
     tabId,
     action,
     durationMs,
+    // 存活缓冲内看到的请求数（dropped>0 时被 2000 上限截断，不是全量）。
     totalRequestsSeen: reqs.size,
+    // 事件缓冲截断标记：transport 侧 2000 上限 shift 掉的事件数。
+    truncated: dropped > 0,
+    droppedEventCount: dropped,
     returned: out.length,
     requests: out,
     captureId,
@@ -189,7 +214,10 @@ async function triggerCapture(sendCmd, session, opts) {
     );
 }
 
-async function doCaptureMany(sendCmd, pairs, opts, eventsByCapture) {
+// droppedByCapture（可选）：transport 侧事件缓冲 2000 上限的逐 capture 丢弃计数
+// （Map captureId -> 条数）。存在时每个会话的结果带 truncated/droppedEventCount。
+async function doCaptureMany(sendCmd, pairs, opts, eventsByCapture, droppedByCapture) {
+  opts = normalizeCaptureOptions(opts);
   const sessions = [];
   try {
     for (const pair of pairs) {
@@ -212,7 +240,7 @@ async function doCaptureMany(sendCmd, pairs, opts, eventsByCapture) {
     );
     // eager 取响应体（T-30）：loadingFinished 一到就取，不等窗口关完——
     // 顶层 octet-stream 文档体关窗后取会报 No resource。取不到的回落旧路径。
-    const bodyStore = new Map(); // "captureId:requestId" -> {body, base64Encoded}
+    const bodyStore = new Map(); // requestKey -> {body, base64Encoded}
     // 资源上界：单次 capture 最多缓存 16MB 响应体、同时最多 8 个取体请求。
     // 早先对所有 loadingFinished 无差别 eager 取体且无上限，实测 120 条无关事件
     // 会产生 120 次 getResponseBody / 约 60MB。
@@ -222,12 +250,12 @@ async function doCaptureMany(sendCmd, pairs, opts, eventsByCapture) {
     let active = 0;
     const inflight = [];
     const fetched = new Set();
-    const requestInfo = new Map(); // "captureId:requestId" -> {type,url}
+    const requestInfo = new Map(); // requestKey -> {type,url}
     for (const session of sessions) {
       for (const ev of eventsByCapture.get(session.captureId) || []) {
         if (ev.method !== "Network.requestWillBeSent" || !ev.params) continue;
         if (!ev.params.requestId) continue;
-        requestInfo.set(session.captureId + ":" + ev.params.requestId, {
+        requestInfo.set(requestKey(session.captureId, ev.params.requestId, ev.sessionId), {
           type: String(ev.params.type || "").toLowerCase(),
           url: (ev.params.request && ev.params.request.url) || "",
         });
@@ -240,7 +268,7 @@ async function doCaptureMany(sendCmd, pairs, opts, eventsByCapture) {
       } catch (_) {}
     }
     // 只有"可能被保留"的响应才值得 eager 取体（与结果整形阶段对齐：二进制按
-    // URL 后缀先挡——mime 在 responseReceived 才有，此处预检拿不到，漏网的由
+    // URL 后缀先挡，随后合并 responseReceived 元信息；漏网的由
     // 整形侧 BINARY_MIME 再杀，bodyStore 16MB 上限兜底）。JSON 的 document 类
     // 响应提前 eager：它们的体只有窗口内取得到（T-30），关窗后兜底必失败。
     const BINARY_URL =
@@ -250,19 +278,30 @@ async function doCaptureMany(sendCmd, pairs, opts, eventsByCapture) {
       if (opts.all) return true;
       if (BINARY_URL.test(info.url || "")) return false;
       if (info.type === "xhr" || info.type === "fetch") return true;
+      if (/json/i.test(info.mimeType || "")) return true;
       if (/json/i.test(info.url || "")) return true;
       return !!(filterRe && filterRe.test(info.url));
     };
     const t0 = Date.now();
     while (Date.now() - t0 < opts.durationMs) {
       for (const session of sessions) {
-        for (const ev of eventsByCapture.get(session.captureId) || []) {
+        const events = eventsByCapture.get(session.captureId) || [];
+        for (const ev of events) {
+          const params = ev.params || {};
+          const key = requestKey(session.captureId, params.requestId, ev.sessionId);
+          if (ev.method === "Network.requestWillBeSent") {
+            requestInfo.set(key, { type: String(params.type || "").toLowerCase(), url: params.request?.url || "" });
+          } else if (ev.method === "Network.responseReceived") {
+            const prev = requestInfo.get(key) || {};
+            requestInfo.set(key, { ...prev, type: String(params.type || prev.type || "").toLowerCase(), url: params.response?.url || prev.url || "", mimeType: params.response?.mimeType || prev.mimeType || "" });
+          }
+        }
+        for (const ev of events) {
           if (ev.method !== "Network.loadingFinished") continue;
           const rid = ev.params && ev.params.requestId;
-          const key = session.captureId + ":" + rid;
+          const key = requestKey(session.captureId, rid, ev.sessionId);
           if (!rid || fetched.has(key)) continue;
           if (!wanted(requestInfo.get(key))) {
-            fetched.add(key);
             continue;
           }
           if (active >= MAX_INFLIGHT) continue; // 配额满：下一轮再取
@@ -274,6 +313,7 @@ async function doCaptureMany(sendCmd, pairs, opts, eventsByCapture) {
                 cmd: "cdp",
                 args: {
                   tabId: session.tabId,
+                  ...(ev.sessionId ? { sessionId: ev.sessionId } : {}),
                   method: "Network.getResponseBody",
                   params: { requestId: rid },
                 },
@@ -300,19 +340,22 @@ async function doCaptureMany(sendCmd, pairs, opts, eventsByCapture) {
           );
         }
       }
-      await wait(Math.min(400, opts.durationMs));
+      await wait(Math.min(400, Math.max(0, opts.durationMs - (Date.now() - t0))));
     }
     await Promise.allSettled(inflight);
     return await Promise.all(
-      sessions.map((session) =>
-        buildCaptureSessionResult(
+      sessions.map(async (session) => {
+        const dropped =
+          (droppedByCapture && droppedByCapture.get(session.captureId)) || 0;
+        return buildCaptureSessionResult(
           sendCmd,
           session,
           eventsByCapture.get(session.captureId) || [],
           opts,
           bodyStore,
-        ),
-      ),
+          dropped,
+        );
+      }),
     );
   } finally {
     await Promise.all(
@@ -327,9 +370,10 @@ async function doCaptureMany(sendCmd, pairs, opts, eventsByCapture) {
           );
         } catch (_) {}
         eventsByCapture.delete(session.captureId);
+        if (droppedByCapture) droppedByCapture.delete(session.captureId);
       }),
     );
   }
 }
 
-module.exports = { buildCaptureSessionResult, triggerCapture, doCaptureMany };
+module.exports = { buildCaptureSessionResult, triggerCapture, doCaptureMany, normalizeCaptureOptions };

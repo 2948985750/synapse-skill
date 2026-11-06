@@ -118,7 +118,7 @@ function listLiveBridges(
 
 // one-shot / status 的候选桥顺序：
 //   显式 WB_BRIDGE_FILE（遗留双实例）独占 → 注册表+遗留全量活桥（ts 降序）
-//   → --session/WB_SESSION 指定桥排前（该桥已死时仍保留全量候选做故障转移）。
+//   → --session/WB_SESSION 严格限定该桥，跨会话须显式 allowFailover。
 // dir/legacyFile/alive 可注入（单测用临时目录；缺省 = 模块级默认）。
 function bridgeCandidates(
   opts = {},
@@ -126,21 +126,19 @@ function bridgeCandidates(
   legacyFile = BRIDGE_FILE,
   alive = pidAlive,
 ) {
+  const want = opts.session || process.env.WB_SESSION || "";
   if (process.env.WB_BRIDGE_FILE) {
     const e = readLiveEntry(
       path.resolve(process.env.WB_BRIDGE_FILE),
       "default",
       alive,
     );
-    return e ? [e] : [];
+    return e && (!want || opts.allowFailover || e.sid === want) ? [e] : [];
   }
   const all = listLiveBridges(dir, legacyFile, alive);
-  const want = opts.session || process.env.WB_SESSION || "";
   if (!want) return all;
   const match = all.filter((e) => e.sid === want);
-  // 指定会话排最前，但保留其它活桥做故障转移：指定桥可能"进程活着、扩展没拨进来"，
-  // 早先只返回该桥，命令会在这个桥里排队直到 50s 超时，永远不会换桥重试。
-  return match.length ? match.concat(all.filter((e) => e.sid !== want)) : all;
+  return opts.allowFailover ? match.concat(all.filter((e) => e.sid !== want)) : match;
 }
 
 module.exports = {

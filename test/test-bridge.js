@@ -119,7 +119,13 @@ test("closed and expired commanders cannot replay writes", () => {
     h.advance(31000);
     h.router.attachExtension(extension);
     assert.equal(extension.sent.length, 0);
-    assert.equal(h.timers.size, 0);
+    // 心跳 reaper（F-6.1）挂上后，扩展接入期间定时器里至多留一条 reaper；
+    // 挂起命令的定时器（entry.timer）必须全部已清理。
+    assert.ok(
+      h.timers.size <= 1,
+      "no pending-command timers remain (at most the heartbeat reaper), got " +
+        h.timers.size,
+    );
     if (!disconnected) assert.equal(a.sent[0].code, "COMMAND_TIMEOUT");
     h.router.close();
   }
@@ -654,7 +660,7 @@ test("registry: live entries list newest-first, same port deduped, stale entries
   );
   fs.rmSync(dir, { recursive: true, force: true });
 });
-test("registry: session pinning puts the pinned bridge first but keeps others as failover", () => {
+test("registry: session pinning is strict unless failover is explicit", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cdp-bridges-"));
   const legacy = path.join(dir, "legacy.json");
   const alive = (p) => p === process.pid;
@@ -674,20 +680,21 @@ test("registry: session pinning puts the pinned bridge first but keeps others as
   assert.deepEqual(
     bridgeCandidates({ session: "a" }, dir, legacy, alive)
       .map((e) => e.sid),
-    ["a", "b"],
-    "指定会话排最前，其余活桥保留做故障转移（指定桥可能在而扩展不在）",
+    ["a"],
+    "指定会话只允许该桥",
   );
   assert.deepEqual(
     bridgeCandidates({ session: "gone" }, dir, legacy, alive)
       .map((e) => e.sid),
-    ["b", "a"],
-    "dead session bridge fails over to remaining live bridges",
+    [],
+    "missing session does not cross into other sessions",
   );
   process.env.WB_SESSION = "b";
   assert.deepEqual(
     bridgeCandidates({}, dir, legacy, alive).map((e) => e.sid),
-    ["b", "a"],
+    ["b"],
   );
+  assert.deepEqual(bridgeCandidates({ session: "a", allowFailover: true }, dir, legacy, alive).map((entry) => entry.sid), ["a", "b"]);
   delete process.env.WB_SESSION;
   process.env.WB_BRIDGE_FILE = legacy;
   fs.writeFileSync(
@@ -830,38 +837,183 @@ test("doctor builds as a command", () => {
   assert.equal(opts.waitMs, 3000);
 });
 // ---------------- T-35：--load-extension 路径护栏 ----------------
-test("resolveExtDir: WB_CDP_EXT_DIR 指向无 manifest 的目录必须报错，不静默带病启动", () => {
-  const { execSync } = require("child_process");
-  // 找本机一个含 manifest.json 的真实扩展根（cdp skill 的 unpacked 扩展），
-  // 作为 resolveExtDir 的合法目标；找不到则跳过（该测试依赖本机环境）。
-  const candidates = [
-    "D:\\project\\skills\\cdp\\extension",
-    "C:\\Users\\Administrator\\.dsh\\skills\\cdp-browser\\extension",
-  ];
-  const valid = candidates.find((c) =>
-    fs.existsSync(path.join(c, "manifest.json")),
-  );
-  if (!valid) {
-    this.skip?.();
-    console.log("(skip) 本机未找到 unpacked 扩展根，resolveExtDir 测试跳过");
-    return;
-  }
-  // WB_CDP_EXT_DIR 指到无 manifest 的目录（如 <valid>/src）→ 必须抛错
-  process.env.WB_CDP_EXT_DIR = path.join(valid, "src");
+test("resolveExtDir validates an isolated manifest fixture", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "synapse-extension-path-"));
+  const previous = process.env.WB_CDP_EXT_DIR;
+  context.after(() => {
+    if (previous === undefined) delete process.env.WB_CDP_EXT_DIR;
+    else process.env.WB_CDP_EXT_DIR = previous;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  process.env.WB_CDP_EXT_DIR = path.join(root, "missing");
   assert.throws(() => resolveExtDir(), /manifest\.json/);
-  // 指向合法扩展根 → 原样返回
-  process.env.WB_CDP_EXT_DIR = valid;
+  fs.writeFileSync(path.join(root, "manifest.json"), JSON.stringify({ manifest_version: 3, name: "fixture", version: "1.0.0" }));
+  process.env.WB_CDP_EXT_DIR = root;
+  assert.equal(resolveExtDir(), root);
+});
+// ---------------- 协议层加固（2026-11-06）：截断标记 / 错误码 / 心跳 / 端口段 ----------------
+test("createChannel: the 2000-event buffer reports truncation via droppedByCapture", () => {
+  const { createChannel } = require("../agent/transport");
+  const sock = new Socket();
+  const channel = createChannel(sock, { clientId: "cap-cli" });
+  const capId = "cap-trunc";
+  for (let i = 0; i < 2500; i++)
+    sock.emit(
+      "message",
+      JSON.stringify({
+        type: "event.push",
+        clientId: "cap-cli",
+        captureId: capId,
+        method: "Network.requestWillBeSent",
+        params: { requestId: "r" + i },
+      }),
+    );
   assert.equal(
-    resolveExtDir().replace(/\\/g, "/"),
-    valid.replace(/\\/g, "/"),
+    channel.eventsByCapture.get(capId).length,
+    2000,
+    "buffer stays capped at 2000",
   );
-  delete process.env.WB_CDP_EXT_DIR;
-  // 缺省（不设 WB_CDP_EXT_DIR）→ paths.js 按候选推导（../cdp/extension、../cdp-browser/extension），
-  // 推导不到时抛"找不到 unpacked 扩展根目录"（独立 skill 形态下扩展不在本目录内，属预期）。
-  // 本机恰好有候选时直接通过，没有则报错——两者都证明 resolveExtDir 做了 manifest 校验。
-  try {
-    resolveExtDir();
-  } catch (e) {
-    assert.match(String(e.message), /manifest\.json|unpacked 扩展根目录/);
-  }
+  assert.equal(
+    channel.droppedByCapture.get(capId),
+    500,
+    "the excess is counted, not dropped silently",
+  );
+  // 留的是最新的 2000 条（最旧的 500 条被 shift 掉）。
+  assert.equal(channel.eventsByCapture.get(capId)[0].params.requestId, "r500");
+});
+test("buildCaptureSessionResult: truncated/droppedEventCount mark a capped buffer", async () => {
+  const send = async () => ({ ok: true, result: {} });
+  const s = { tabId: 1, action: "wait", captureId: "cap" };
+  const capped = await buildCaptureSessionResult(
+    send,
+    s,
+    [],
+    { durationMs: 1 },
+    new Map(),
+    500,
+  );
+  assert.equal(capped.truncated, true, "excess events => truncated");
+  assert.equal(capped.droppedEventCount, 500);
+  const whole = await buildCaptureSessionResult(
+    send,
+    s,
+    [],
+    { durationMs: 1 },
+    new Map(),
+    0,
+  );
+  assert.equal(whole.truncated, false, "no excess => not truncated");
+  assert.equal(whole.droppedEventCount, 0);
+  // 旧调用方（不传 dropped）保持向后兼容。
+  const legacy = await buildCaptureSessionResult(send, s, [], { durationMs: 1 });
+  assert.equal(legacy.truncated, false);
+  assert.equal(legacy.droppedEventCount, 0);
+});
+test("agent.result error codes stay machine-readable across the wire (code + isRetryable)", async () => {
+  const { createChannel, isRetryable } = require("../agent/transport");
+  const sock = new Socket();
+  const channel = createChannel(sock, { clientId: "code-cli" });
+  const rejectOf = (p) => p.then(() => { throw new Error("expected reject"); }, (e) => e);
+  const p1 = channel.sendCmd({ cmd: "navigate", args: { tabId: 1 } }, 2000);
+  sock.emit(
+    "message",
+    JSON.stringify({
+      type: "agent.result",
+      id: sock.sent[0].id,
+      ok: false,
+      code: "LOCK_TIMEOUT",
+      error: "TabLock.acquire(1) timed out after 30000ms",
+    }),
+  );
+  const err1 = await rejectOf(p1);
+  assert.equal(err1.code, "LOCK_TIMEOUT");
+  assert.equal(isRetryable(err1), true, "LOCK_TIMEOUT is retryable");
+  const p2 = channel.sendCmd({ cmd: "navigate", args: { tabId: 1 } }, 2000);
+  sock.emit(
+    "message",
+    JSON.stringify({
+      type: "agent.result",
+      id: sock.sent[1].id,
+      ok: false,
+      code: "UNKNOWN_CMD",
+      error: "unknown agent cmd: noSuchCmd",
+    }),
+  );
+  const err2 = await rejectOf(p2);
+  assert.equal(err2.code, "UNKNOWN_CMD");
+  assert.equal(isRetryable(err2), false, "UNKNOWN_CMD is permanent");
+  // 扩展没给 code（旧版扩展）→ 回退 COMMAND_FAILED，仍不可重试。
+  const p3 = channel.sendCmd({ cmd: "navigate", args: {} }, 2000);
+  sock.emit(
+    "message",
+    JSON.stringify({
+      type: "agent.result",
+      id: sock.sent[2].id,
+      ok: false,
+      error: "no code here",
+    }),
+  );
+  const err3 = await rejectOf(p3);
+  assert.equal(err3.code, "COMMAND_FAILED");
+  assert.equal(isRetryable(err3), false);
+});
+test("agent heartbeat: a ping frame gets a pong back out the channel socket", () => {
+  const { createChannel } = require("../agent/transport");
+  const sock = new Socket();
+  createChannel(sock, { clientId: "hb-cli" });
+  sock.emit("message", JSON.stringify({ type: "ping", ts: 123 }));
+  assert.deepEqual(sock.sent.at(-1), { type: "pong", ts: 123 });
+});
+test("router heartbeat: an extension ping gets a pong (serve daemon path)", () => {
+  const h = harness(),
+    extension = new Socket();
+  h.router.attachExtension(extension);
+  h.router.extensionMessage(extension, { type: "ping", ts: 42 });
+  assert.deepEqual(extension.sent.at(-1), { type: "pong", ts: 42 });
+  h.router.close();
+});
+test("router heartbeat reaper: a silent extension is closed; staleness is a pure predicate", () => {
+  const {
+    isExtensionStale,
+    HEARTBEAT_TIMEOUT_MS,
+    HEARTBEAT_CHECK_MS,
+  } = require("../agent/bridge-router");
+  assert.equal(
+    isExtensionStale(0, HEARTBEAT_TIMEOUT_MS, HEARTBEAT_TIMEOUT_MS),
+    false,
+    "exactly at the threshold is not stale",
+  );
+  assert.equal(
+    isExtensionStale(0, HEARTBEAT_TIMEOUT_MS + 1, HEARTBEAT_TIMEOUT_MS),
+    true,
+  );
+  const h = harness(),
+    extension = new Socket();
+  h.router.attachExtension(extension);
+  // 静默 50s（> 40s 阈值）：reaper 把它关掉（假 socket 无 terminate，走 close(1008)）。
+  h.advance(HEARTBEAT_TIMEOUT_MS + HEARTBEAT_CHECK_MS);
+  assert.equal(extension.readyState, 3, "stale extension was closed by the reaper");
+  assert.equal(extension.closeCode, 1008);
+  h.router.close();
+});
+test("config: PORT_RANGE_OVERRIDDEN flags the two-sided port-range env override", () => {
+  const configPath = require.resolve("../agent/config");
+  delete process.env.WB_AGENT_WS_START;
+  delete process.env.WB_AGENT_WS_END;
+  delete require.cache[configPath];
+  assert.equal(
+    require(configPath).PORT_RANGE_OVERRIDDEN,
+    false,
+    "default: no override",
+  );
+  process.env.WB_AGENT_WS_START = "9600";
+  delete require.cache[configPath];
+  assert.equal(require(configPath).PORT_RANGE_OVERRIDDEN, true, "START set");
+  delete process.env.WB_AGENT_WS_START;
+  process.env.WB_AGENT_WS_END = "9610";
+  delete require.cache[configPath];
+  assert.equal(require(configPath).PORT_RANGE_OVERRIDDEN, true, "END set");
+  delete process.env.WB_AGENT_WS_END;
+  delete require.cache[configPath];
+  require(configPath); // 恢复默认缓存，不影响同进程其它用例
 });

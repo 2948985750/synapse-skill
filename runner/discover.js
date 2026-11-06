@@ -10,13 +10,12 @@
 //   run —— open the entry page ONCE and take a single-page rich snapshot:
 //          all interactive elements (incl. SPA jump containers: cursor:pointer /
 //          onclick / role=link divs, not just <a href>) + structure probe + XHR
-//          capture (bodies included), then write ONE profile draft at
-//          <PROFILES_ROOT>/draft/<domain>.json with the snapshot embedded.
+//          capture (bodies included), then write ONE profile at
+//          <PROFILES_ROOT>/<domain>.json with the snapshot embedded.
 //          The program does NOT auto-follow links to crawl further pages —
 //          page-to-page jumps / routes are discovered by the LLM during
 //          interactive exploration (click → observe location change → summarize),
-//          which also fills the knowledge fields; human review promotes the
-//          draft to a formal profile.
+//          which also fills the knowledge fields.
 //
 // Safety is enforced here, not left to model compliance:
 //   - same-origin only (cross-origin redirect recorded, never visited);
@@ -52,7 +51,6 @@ function getOpt(argv, name, fallback) {
 function ensureProfilesSeeded() {
   const seedDir = path.join(ROOT, "profiles");
   fs.mkdirSync(PROFILES_ROOT, { recursive: true });
-  fs.mkdirSync(path.join(PROFILES_ROOT, "draft"), { recursive: true });
   const seeded = [];
   if (fs.existsSync(seedDir)) {
     for (const f of fs.readdirSync(seedDir)) {
@@ -115,12 +113,11 @@ function isDangerousLabel(text) {
   return null;
 }
 
-// 只收 http(s)；去掉 hash（同页锚点不是不同页面），query 保留（?q= 就是功能）。
+// 只收 http(s)；保留 query 和 hash 路由。
 function normalizeUrl(u) {
   try {
     const url = new URL(String(u));
     if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    url.hash = "";
     return url.href;
   } catch (_) {
     return null;
@@ -142,7 +139,7 @@ function clusterByPathPrefix(urls, segs = 1) {
   return out;
 }
 
-// 紧凑目录段（纯数据）：draft 的"各段规模"。LLM 读 draft 的第一步只看这段
+// 紧凑目录段（纯数据）：画像的"各段规模"。LLM 读画像的第一步只看这段
 // （~10 行）就知道盘子多大，再按需开 snapshot/capture。只承载规模，不承载
 // 业务信号（接口家底/危险词等仍由 LLM 进 snapshot 段自己看）。
 function buildDigest(snapshot) {
@@ -175,12 +172,17 @@ function buildDigest(snapshot) {
   };
 }
 
-function buildDraftSkeleton({ domain, entry, visited, observations }) {
+function buildProfileSkeleton({ domain, entry, visited, observations, snapshot }) {
   const today = new Date().toISOString().slice(0, 10);
   return {
     schemaVersion: 3,
     domain,
     status: "draft",
+    // 目录段（token 经济）：只承载各段规模（pages/interactive/clickables/forms/
+    // lists/responseBodies/snapshotKb），LLM 读画像的第一步先看它定盘子（~10 行），
+    // 再按需开 snapshot/capture。不承载业务信号（接口家底/危险词等由 LLM 进
+    // snapshot 段自己看）。
+    digest: buildDigest(snapshot),
     createdAt: today,
     updatedAt: today,
     access: {
@@ -197,6 +199,9 @@ function buildDraftSkeleton({ domain, entry, visited, observations }) {
     actions: [],
     pending: [],
     goal: "站点画像采集完成",
+    // 采集快照：仅可交互元素（sig/text/interactive）与可点容器；跨页重复的
+    // 站点框架归并在 chrome 一份。画像本身就是采集产物，无独立材料包。
+    snapshot,
   };
 }
 
@@ -245,7 +250,7 @@ const OUTLINE_PROBE_JS =
   "var tag=el.tagName,role=el.getAttribute('role')||'';" +
   "var it={sig:sig(el),tag:tag,role:role,text:text.slice(0,80)," +
   "interactive:!!(ITAG[tag]||(role&&IROLE[role])||el.hasAttribute('tabindex')||el.hasAttribute('onclick')||el.isContentEditable)};" +
-  "if(tag==='A'&&el.href)it.href=String(el.href).split('#')[0];" +
+  "if(tag==='A'&&el.href)it.href=String(el.href);" +
   "if(!it.interactive&&cur>0){cur--;try{it.cursorPointer=getComputedStyle(el).cursor==='pointer'}catch(e){}}" +
   "items.push(it)});" +
   "[].forEach.call(document.querySelectorAll('img[alt]'),function(im){" +
@@ -262,7 +267,7 @@ const OUTLINE_PROBE_JS =
   "if(covered)continue;emitted.push(el);" +
   "var la=el.matches('a[href]')?el:el.querySelector('a[href]');" +
   "var it2={sig:sig(el),text:txt.slice(0,80)};" +
-  "if(la&&la.href)it2.href=String(la.href).split('#')[0];" +
+  "if(la&&la.href)it2.href=String(la.href);" +
   "clicks.push(it2);" +
   "if(clicks.length>=30)break}" +
   "return {outline:items,clickables:clicks}" +
@@ -518,6 +523,7 @@ const ALLOWED_FLAGS = new Set([
   "--dwell-ms",
   "--settle-ms",
   "--session",
+  "--browser-id",
   "--force",
   "--keep-tab",
   "--capture",
@@ -539,7 +545,7 @@ async function discoverRun(argv, deps = {}) {
     console.error(
       "[discover] 不接受的参数: " +
         unknown.join(" ") +
-        "\n  采集结果写入 <PROFILES_ROOT>/draft/<domain>.json（程序固定位置），" +
+        "\n  采集结果写入 <PROFILES_ROOT>/<domain>.json（程序固定位置），" +
         "不接受任何位置旗标；重定位请改操作者配置（config set data-root/profile-root 或 WB_* 环境变量）。",
     );
     return 1;
@@ -563,10 +569,10 @@ async function discoverRun(argv, deps = {}) {
 
   // 位置完全由程序决定：没有位置旗标，agent 无权指定保存位置。
   // 采集结果直接写进画像（快照在 snapshot 段）——不存在独立的"材料包"。
-  const draftPath = path.join(PROFILES_ROOT, "draft", domain + ".json");
+  const profilePath = path.join(PROFILES_ROOT, domain + ".json");
 
-  if (fs.existsSync(draftPath) && !force) {
-    console.error("[discover] draft 已存在（--force 覆盖）: " + draftPath);
+  if (fs.existsSync(profilePath) && !force) {
+    console.error("[discover] 画像已存在（--force 覆盖）: " + profilePath);
     return 1;
   }
 
@@ -576,8 +582,9 @@ async function discoverRun(argv, deps = {}) {
   // 喂给 doCaptureMany，不经过命令 args），所以这里必须带 durationMs。
   const browser = await connect({
     ...(session ? { session } : {}),
+    browserId: getOpt(argv, "--browser-id", ""),
     durationMs: dwellMs,
-    // token 经济：单条响应体 16KB 上限（draft 是给 LLM 读的，接口"长什么样"
+    // token 经济：单条响应体 16KB 上限（响应体是给 LLM 读的，接口"长什么样"
     // 16KB 足够看结构，全量原文是浪费）；超预算条目由 pruneCapture 再降级 shape。
     bodyMaxKb: 16,
     triggerJs: SCROLL_TRIGGER_JS,
@@ -651,8 +658,8 @@ async function discoverRun(argv, deps = {}) {
 
     if (!crossOrigin) {
       try {
-        const snap = await browser.snapshot(tabId, { max: 60 });
-        // snapshot 返回 {url,ts,total,count,items}，不是裸数组。
+        const snap = await browser.collectElements(tabId, { max: 60 });
+        // collect-elements 返回 {url,ts,total,count,items}，不是裸数组。
         const items = Array.isArray(snap) ? snap : (snap && snap.items) || [];
         for (const el of items) {
           const label = String(el.label || "");
@@ -672,7 +679,7 @@ async function discoverRun(argv, deps = {}) {
     }
 
     // 危险词覆盖整页大纲/SPA 可点容器，不只快照前 60 条。带 where 标明出处；
-    // 不存 snapshot 的 i 编号（它是当次会话的索引空间，draft 里没有那张表，
+    // 不存 snapshot 的 i 编号（它是当次会话的索引空间，画像里没有那张表，
     // 实跑时编号也会漂移，只靠 tag/role/sig/label 定位）。
     const seenDanger = new Set();
     for (const it of [...(page.outline || []), ...(page.clickables || [])]) {
@@ -716,20 +723,22 @@ async function discoverRun(argv, deps = {}) {
         note: "单页富快照；页间跳转/路由由 LLM 交互观测补全（discover 不再自动跟链接）",
       },
     };
-    const draft = buildDraftSkeleton({
+    const snapshot = buildSnapshot([page], { skipped });
+    const profile = buildProfileSkeleton({
       domain,
       entry,
       visited: [entry],
       observations,
+      snapshot,
     });
-    fs.mkdirSync(path.dirname(draftPath), { recursive: true });
-    // draft 是纯数据画像（.json）：采集快照在 snapshot 段，知识字段（fieldMap/
+    fs.mkdirSync(path.dirname(profilePath), { recursive: true });
+    // 画像本身是采集产物（纯数据）：采集快照在 snapshot 段，知识字段（fieldMap/
     // pageNotes/antiScrape）由 agent 依 snapshot 补全；没有任何代码。
     // 原子写（同目录 tmp + rename，与 agent/lib/json-store 同纪律）：半写坏的
-    // draft 会让下次"已存在拒绝"卡在损坏文件上。
-    const tmpPath = draftPath + "." + process.pid + ".tmp";
-    fs.writeFileSync(tmpPath, JSON.stringify(draft, null, 2) + "\n", "utf8");
-    fs.renameSync(tmpPath, draftPath);
+    // 文件会让下次"已存在拒绝"卡在损坏文件上。
+    const tmpPath = profilePath + "." + process.pid + ".tmp";
+    fs.writeFileSync(tmpPath, JSON.stringify(profile, null, 2) + "\n", "utf8");
+    fs.renameSync(tmpPath, profilePath);
 
     const bodyCount =
       page.capture && page.capture.requests ? page.capture.requests.length : 0;
@@ -749,8 +758,8 @@ async function discoverRun(argv, deps = {}) {
           interactive: page.outline.length + page.clickables.length,
           responseBodies: bodyCount,
         },
-        draft: draftPath,
-        note: "单页富快照（含 SPA 跳转容器）已写入 draft.snapshot；页间跳转与路由由 LLM 交互观测补全，知识字段（fieldMap/pageNotes/antiScrape）由 agent 依 snapshot 补全（见 SKILL.md「画像生产」）",
+        profile: profilePath,
+        note: "单页富快照（含 SPA 跳转容器）已写入 snapshot 段；页间跳转与路由由 LLM 交互观测补全，知识字段（fieldMap/pageNotes/antiScrape）由 agent 依 snapshot 补全（见 SKILL.md「画像生产」）",
       }),
     );
     return 0;
@@ -785,7 +794,7 @@ module.exports = {
   isDangerousLabel,
   normalizeUrl,
   clusterByPathPrefix,
-  buildDraftSkeleton,
+  buildProfileSkeleton,
   buildSnapshot,
   pruneStructure,
   pruneCapture,

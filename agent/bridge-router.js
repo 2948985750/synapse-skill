@@ -18,6 +18,17 @@ const MAX_PENDING_PER_CLIENT = 64;
 const MAX_CLEANUPS = 64;
 // lateStarts 是"超时后才回来的 capture.start"的补偿队列，必须有上限。
 const LATE_STARTS_MAX = 200;
+// 心跳 reaper（F-6.1）：STALE_EXTENSION_MS 只在"新扩展拨入"时才救场；
+// 扩展彻底失联（SW 挂起、半开）且没有新拨入时，slot 会永久被僵尸占住。
+// reaper 周期检查：扩展 socket 静默超过 HEARTBEAT_TIMEOUT_MS 就 terminate，
+// 释放 slot、状态不再被当成活桥。周期 10s；阈值 40s = 2×扩展 ping 周期
+// （扩展 20s 一次 ping，agent 回 pong；正常活桥的任何帧都会刷新 lastFrameAt）。
+const HEARTBEAT_CHECK_MS = 10000;
+const HEARTBEAT_TIMEOUT_MS = 40000;
+// 纯函数判定：lastFrameAt 距 now 是否超过超时阈值（> 而非 >=，边界可测）。
+function isExtensionStale(lastFrameAt, now, timeoutMs = HEARTBEAT_TIMEOUT_MS) {
+  return now - lastFrameAt > timeoutMs;
+}
 
 function createBridgeRouter({
   now = Date.now,
@@ -33,6 +44,7 @@ function createBridgeRouter({
   const lateStarts = new Map();
   const earlyEvents = new Map();
   let lastExtensionSeen = 0;
+  let reaperTimer = null;
 
   function send(socket, message) {
     if (!socket || socket.readyState !== 1) return false;
@@ -102,12 +114,47 @@ function createBridgeRouter({
     }
     extension = socket;
     lastExtensionSeen = now();
+    // 心跳 reaper 启动（只在无活动时挂）：静默超过阈值即使没有新扩展拨入，
+    // 也把半开 socket terminate 掉，释放 slot。
+    armReaper();
     for (const entry of [...queue]) {
       const index = queue.indexOf(entry);
       if (index !== -1) queue.splice(index, 1);
       forward(entry);
     }
     return true;
+  }
+  // reaper 定时器在真实 setTimeout 下 unref（serve 进程本身被 WS server 挂着，
+  // 不需要靠它续命；也避免"router 忘了 close"时定时器把测试进程钉住 10s）。
+  function armReaper() {
+    if (reaperTimer != null) return;
+    reaperTimer = setTimer(reapStaleExtension, HEARTBEAT_CHECK_MS);
+    if (reaperTimer && typeof reaperTimer.unref === "function")
+      reaperTimer.unref();
+  }
+  function reapStaleExtension() {
+    // 本条定时器已触发（harness/真定时器皆然）：标记失效，走完检查后重新挂。
+    reaperTimer = null;
+    // 无 socket 时纯 no-op（仍然自续期，扩展随时可能拨入）。
+    if (
+      extension &&
+      extension.readyState === 1 &&
+      lastExtensionSeen > 0 &&
+      isExtensionStale(lastExtensionSeen, now())
+    ) {
+      try {
+        extension.terminate();
+      } catch (_) {
+        try {
+          extension.close(1008, "stale extension");
+        } catch (__) {}
+      }
+      // 真实 socket：terminate 后 close 事件会走 disconnect() 做全套清理，不重复。
+      // 假 socket（测试桩，无 close 事件）terminate 后 readyState 仍是 1：
+      // 本地直接 disconnect，否则 slot 永远停在僵尸上。
+      if (extension.readyState === 1) disconnect(extension);
+    }
+    armReaper();
   }
   function addClient(socket) {
     clients.set(socket, { clientId: null, transientClient: true });
@@ -225,7 +272,14 @@ function createBridgeRouter({
   }
   function extensionMessage(socket, message) {
     if (socket !== extension || !message) return;
+    // 任何帧（含 pong）都刷新心跳基准——这是 reaper 的存活证据。
     lastExtensionSeen = now();
+    if (message.type === "ping") {
+      // 心跳应答（F-6.1 双向）：serve 守护进程路径也要回 pong，
+      // 否则扩展端拿不到 liveness 信号，挂起的 agent 成僵尸。
+      send(socket, { type: "pong", ts: message.ts });
+      return;
+    }
     if (message.type === "agent.result") {
       const cleanup = cleanups.get(message.id);
       if (cleanup) {
@@ -382,6 +436,11 @@ function createBridgeRouter({
       captureOwners.clear();
       earlyEvents.clear();
       lateStarts.clear();
+      // 扩展 slot 已空：停掉心跳 reaper（新扩展接入时会重新挂上）。
+      if (reaperTimer) {
+        clearTimer(reaperTimer);
+        reaperTimer = null;
+      }
       for (const entry of [...pending.values()])
         if (entry.dispatched)
           finish(entry, {
@@ -413,6 +472,10 @@ function createBridgeRouter({
     captureOwners.clear();
     earlyEvents.clear();
     lateStarts.clear();
+    if (reaperTimer) {
+      clearTimer(reaperTimer);
+      reaperTimer = null;
+    }
     for (const cleanup of cleanups.values())
       if (cleanup.timer) clearTimer(cleanup.timer);
     cleanups.clear();
@@ -428,4 +491,9 @@ function createBridgeRouter({
   };
 }
 
-module.exports = { createBridgeRouter };
+module.exports = {
+  createBridgeRouter,
+  isExtensionStale,
+  HEARTBEAT_CHECK_MS,
+  HEARTBEAT_TIMEOUT_MS,
+};

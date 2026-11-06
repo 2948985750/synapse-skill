@@ -7,6 +7,72 @@
 
 ---
 
+### 可靠性审查补修（2026-11-06，未提交）
+
+- 修复子会话网络请求仅按 requestId 合并、取体丢失 sessionId：元信息、缓存、即时/兜底取体按完整会话身份隔离，保留原主会话缓存键兼容。
+- readPage/collectElements 的 waitFor 改为实际执行的读取前置条件；同步 type/select 异步完成标识和回归测试。
+- 输入值核对等待事件循环与渲染机会，已知 ref 移除可用于 detached 等待，开放 Shadow Host 的区域查询不再漏掉自身 shadowRoot。
+- 扩展在后续派发前重查取消/期限，资源收尾继续执行；澄清可信本机鉴权边界，不引入反爬或新的授权流程。
+- 验证：两仓新增 15 条自动回归，修复前先复现相关失败；两仓完整测试和扩展打包通过，独立临时 Edge profile 的 19 项端到端检查通过。完整 OOPIF 生命周期仍未实际验收。
+
+### 网页操作可靠性补齐（2026-11-06，未提交）
+
+- 新增 read-page、wait-for、click-cdp 及 SDK 入口；支持当前文档稳定 ref、唯一定位器、按区域/字段有界读取和显式 sessionId/contextId。
+- 交互增加可操作性与输入值核对，导航/操作可声明后置条件；验证超时不重发动作。原有导航结果不升级为业务完成。
+- 文件赋值前检查本地普通文件，支持多文件；扩展拒绝歧义输入并核对 FileList。显式视口 set/reset，默认 attach 不覆盖窗口尺寸。
+- 增加模拟页内/命令链路、本地文件和 SDK 参数回归；尚无真实网站端到端验收。不包含反爬机制。
+
+### 对比后补修：页内异常传播与 SDK 执行期限（2026-11-06，未提交）
+
+- 现象：内建 DOM 命令收到 CDP exceptionDetails 后仍可能返回成功消息包，原始异常被替换为查无元素/空结果；Runtime.callFunctionOn 等执行方法未走 agent 异常检查；SDK run 忽略单次 timeoutMs。
+- 修法：扩展统一读取页内执行结果，异常或缺失预期返回值抛 EVALUATION_FAILED；agent 对所有 CDP 回复检查 exceptionDetails；SDK run 同时透传 CDP timeoutMs 与 commandTimeoutMs。不自动重试，不把超时解释成脚本已停止。
+- 验证：新增先失败后通过的回归，覆盖七条 DOM 路径、四类 Runtime 方法、正常 undefined/查无元素、单次派发、SDK 参数透传；扩展消息链路补错误码/原因保留测试。
+- 文档：新增 CDP-COMPARISON.md，收紧 actions 功能描述，保留现有双仓架构，不引入第三方运行时依赖。
+
+### 审查修复：结果语义、目标路由与无损诊断（2026-11-06，未提交）
+
+- doctor 移除自动 kill、profile 缓存删除与浏览器重启路径，只诊断和等待重连；废弃 force-kill 显式报错。
+- actions 拒绝 draft，核验加载与最终 URL（含 hash），只记录导航；输出 taskSucceeded:false，不宣称业务成功。状态原子写入、同 action 互斥，损坏状态显式报错，连接与命令实际使用 timeout 预算。
+- session 默认严格匹配，跨会话仅显式 allow-failover；新增 browser-id/WB_BROWSER_ID/SDK browserId 校验，目标标识随命令透传，由接收扩展再核对。
+- status 为每个候选保留探测预算；capture 的 SDK 默认时长统一为 12000ms，并在窗口内持续更新请求元信息、及时取体。
+- discover 保留 hash 路由；补隔离画像与运行时回归测试；使用说明同步。CDP_TIMEOUT 不再标为可盲重试。
+
+### 修复：discover 画像丢采集数据（1a9f12e 误删 digest+snapshot 接线）+ actions 旧步骤机死代码清理（2026-11-05）
+
+- **现象 1（discover）**：`discover --url` 把整页探针结果采进局部 `page` 对象、摘要也照常
+  打印，但落盘画像只有几百字节的知识骨架——`buildSnapshot`/`buildDigest`/`pruneCapture`
+  沦为零调用死代码；而 runner stdout 仍宣称「已写入 snapshot 段」、SKILL.md/README 仍教
+  agent「先读顶层 digest → 按需开 snapshot/capture」，三方互相矛盾。
+- **根因 1**：1a9f12e（动作结构对齐 title+url+guards）重写骨架函数时把 `snapshot`/`digest`
+  参数与字段一并删了——属顺手误伤，不是本意：fcdfd2c 的 token 经济设计就是「采集结果
+  瘦身进画像 snapshot 段（双上限 + 256KB 响应体预算）+ digest 只记各段规模」。
+- **修法 1**：恢复接线——`discoverRun` 重建 `buildSnapshot([page], { skipped })` 传进
+  `buildProfileSkeleton`，画像顶层重新携带 `digest`（纯规模目录：pages/interactive/
+  clickables/forms/lists/responseBodies/snapshotKb，不承载业务信号）与 `snapshot`（瘦身
+  元素快照）；1a9f12e 的其余改动全部保留：`--capture` 仍默认关闭、按需抓响应体，知识
+  骨架字段（fieldMap/pageNotes/actions/pending/goal/access/limits/antiScrape）与命名
+  （`buildProfileSkeleton`/`profilePath`）不变；stdout note 的「已写入 snapshot 段」重新为真。
+- **现象 2（actions）**：`runner/actions.js` 还躺着动作模型简化前的整套步骤机
+  （`execStep`/`runVerify`/`queryInfo`/`resolveEntry`/`jsClickRect`/`pollUntil` +
+  `STEP_OPS`/`TYPE_MODES`/`VERIFY_OPS`），零调用——现行模型已是 {title, url, guards}，
+  执行 = 参数展开 → 导航到结晶 URL → 记状态；残留机器让读代码的人误以为 actions
+  还会执行步骤、跑验证。
+- **根因 2**：1a9f12e 只重写了 `main()`，旧步骤机没跟着删。
+- **修法 2**：整删死机器与仅其使用的助手（`labelViolates` 因被单测与 never 匹配语义
+  引用而保留）；模块 docblock/用法注释对齐真实语义：动作执行 = 校验 → 护栏 → 参数展开
+  → 导航 → 记状态，导航失败 exit 3 交 agent 即席接管（on_fail 默认话术不变）；
+  exit 0/1/2/3 与 `CRYSTALLIZE_HINT` 照旧。
+- **文档**：commands.js 的 actions/discover 描述对齐（exit 3 改「导航/执行失败」；discover
+  注明产物含 digest+snapshot+知识骨架、--capture 按需）并重跑 `npm run usage:sync`；
+  SKILL.md「读画像两步协议」恢复「先读顶层 digest 定盘子 → 再按需开 snapshot/capture」、
+  「采集画像」补 --capture 按需；README 画像生产段同步（顺带修掉 `--plan`/`--max-pages`/
+  `--depth` 已退役旗标示例与 flows/params/dataEndpoints 旧字段名）。
+- **测试**：test-discover.js 骨架用例反转（snapshot/digest 必须在场 + digest 只含规模键、
+  不承载业务信号的守卫复活）；test-actions.js 删 resolveEntry/jsClickRect 两例（18→16）；
+  `npm test` 全绿。
+
+---
+
 ### 变更：基础动词 click/type 也迁到 CLI（操作层 100% 归 skill 仓，扩展只留观测+基建）（2026-11-02）
 
 - **背景**：解耦手势后，操作层仍有一处不一致——`click-el`/`type-el`（合成事件动词）
@@ -107,6 +173,34 @@
 - **测试**：本仓 `npm test` 全绿（bridge 28 + 命令表 33 + 回归 10 + discover 13 +
   actions 19）；扩展仓 `npm test` 全绿（verify-version + tablock 8 + lib 24 +
   background 37）。
+
+---
+
+### 变更：去掉 `draft/` 子目录——待审画像与正式画像同目录，靠 `status` 字段区分
+
+- **背景**：画像一直有两个状态——`draft`（采集产出、待人审）与 `reviewed`（人审通过、可
+  被 `runner/actions.js` 消费）。之前用物理目录区分（`profiles/draft/` vs `profiles/`），
+  于是 `loadProfile` 多传一个 `draft` 布尔、`discover` 的产物描述与 SKILL.md/README 都
+  多了一层 `draft/` 路径。用户拍板：画像统一落 `<PROFILES_ROOT>/<domain>.json`，不再套
+  `draft/` 子目录。
+- **修法**：
+  - `runner/actions.js`：`loadProfile(domain)` 只读画像根，删除 `--draft` 旗标与
+    `parseArgv` 里的 draft 分支（`main` 用法字符串、头文件注释同步）；
+  - `runner/discover.js`：`ensureProfilesSeeded()` 不再建 `profiles/draft`；产物路径
+    `<PROFILES_ROOT>/<domain>.json`；"已存在拒绝"的报错从「draft 已存在」改为
+    「画像已存在」；注释与 buildDraftSkeleton 的调用注释同步去掉 draft 措辞；
+  - `agent/commands.js`：`actions` 用法去掉 `--draft`；`discover` 描述改为
+    「产物唯一 `<PROFILES_ROOT>/<domain>.json`；--force 覆盖已有画像」；
+  - `test/test-actions.js`：`parseArgv` 断言去掉 `--draft`；`loadProfile` 用例改为
+    「只读画像根 + 缺画像抛 `画像不存在`」；画像结构校验扫描 `profiles/` 全部 `.json`
+    （不再扫 `draft/`）；
+  - `test/test-discover.js`：`isInside` 锚内用例去掉 `draft/` 路径；`buildDraftSkeleton`
+    用例改名 `buildProfileSkeleton`；位置旗标拒绝测试把 `--draft` 换成 `--profile`；
+  - `SKILL.md` / `README.md` / `ONBOARDING.md`：产物路径与读画像两步协议同步改口；
+    README 路径表把「画像 draft（待审）」改为「同目录，靠 `status: draft` 区分」。
+- **影响**：`discover` 的产物与 `actions` 的消费路径合一——人审通过只需把同文件的
+  `status` 从 `draft` 改成 `reviewed`，不必搬文件。`profiles/draft/` 目录已删除（本次
+  为空）。历史 CHANGELOG 条目保留原样（它们记录的是当时的真实布局）。
 
 ---
 

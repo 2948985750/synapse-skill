@@ -10,7 +10,6 @@ const crypto = require("crypto");
 
 const { createBridgeRouter } = require("./bridge-router");
 const { readToken, authenticateServer } = require("./bridge-auth");
-const { resolveExtDir: _pathsResolveExtDir } = require("./paths");
 const {
   SID_RE,
   writeBridge,
@@ -29,7 +28,26 @@ const {
 } = require("./transport");
 const { probeStatusSnapshot, runStatus, runDoctor } = require("./doctor");
 const { usage, parseArgs, buildCmd, validateOptions } = require("./cli");
-const { STATUS_TIMEOUT_MS } = require("./config");
+const {
+  STATUS_TIMEOUT_MS,
+  PORT_RANGE_START,
+  PORT_RANGE_END,
+  PORT_RANGE_OVERRIDDEN,
+} = require("./config");
+
+// 端口段被覆盖时的双端契约告警：扩展默认只扫 9521–9540（写死同一段），
+// 用户若只在 agent 侧设了 WB_AGENT_WS_START/END，扩展会静默发现不了桥。
+// 凡是"起监听端口、等扩展拨入"的入口都打一次这条 stderr 告警。
+function warnIfPortRangeOverridden() {
+  if (!PORT_RANGE_OVERRIDDEN) return;
+  console.error(
+    "⚠ 你覆盖了 WS 端口段（WB_AGENT_WS_START/END → " +
+      PORT_RANGE_START +
+      "–" +
+      PORT_RANGE_END +
+      "）；扩展端默认只扫 9521–9540，若想让扩展也跟随此段，请在扩展 chrome.storage.local 里设置 wbAgentWsRange（{start,end}），否则扩展发现不到桥",
+  );
+}
 
 // 写注册表失败时必须先关掉监听再抛错：早先 writeRegistryEntry 裸调，
 // srv 仍持有事件循环，进程会"报错但活着"，用户看到 JSON 错误却关不掉窗口。
@@ -73,6 +91,7 @@ function wireBridgeServer(srv, router, token) {
 
 async function runServe(sid, token, opts = {}) {
   const { srv, port } = await bindAgentWs();
+  warnIfPortRangeOverridden(); // 监听端口选定处：覆盖端口段时扩展默认扫不到这里
   const router = createBridgeRouter();
   const session = SID_RE.test(sid)
     ? sid
@@ -117,6 +136,7 @@ async function runServe(sid, token, opts = {}) {
 // 旧 --keep 的直连 server 只收扩展、拒绝其它客户端，是"会话桥"不可复用的根源。
 async function runKeep(command, token, opts) {
   const { srv, port } = await bindAgentWs();
+  warnIfPortRangeOverridden();
   const router = createBridgeRouter();
   const rawSid = opts.session || process.env.WB_SESSION || "";
   const session = SID_RE.test(rawSid)
@@ -159,28 +179,6 @@ async function runKeep(command, token, opts) {
 // bridgeAlive，避免把"扩展黑坑 T-23"误判为"桥死"而反复重启 serve）。
 // probeStatusSnapshot 只做探测（doctor 复用）；runStatus 负责输出与退出码。
 
-// ---------------- 链路医生 + 多会话协调恢复（T-34） ----------------
-// 多会话痛点：每个会话看到"扩展不活"就各自手跑 T-17（taskkill Edge + 清缓存 +
-// 重启）→ N 个会话 = N 次连环关开浏览器；且多数"不活"只是 SW 重拨窗口
-// （5s rescan / 30s keepalive）未过。doctor 把恢复收敛成一条协调命令：
-//   1) 快查：任一活桥的扩展 diag 正常 → 直接放行；
-//   2) 礼貌等待（默认 = --wait，60s）：宿主一个探针 WS 端口接 SW 重拨，同时
-//      轮询各活桥——等期间别的会话的 doctor/恢复动作也会让它变好；
-//   3) 协调硬刷：data/maintenance.lock.json（O_EXCL 原子锁，TTL 180s）保证同一
-//      时刻只有一个会话执行 kill+清缓存+重启；排上的会话等锁释放后复查健康，
-//      别人已修好就直接放行，不再杀一次浏览器。硬刷明细写 data/maintenance.log。
-// 解析要加载的扩展根目录并校验 manifest.json 存在（T-35 护栏）。
-// 事故：某次把 --load-extension 指到了 extension/src（子目录，无清单）→
-// Edge 启动报「无法加载扩展：清单文件丢失或不可读取」。launch 前必须确认
-// 目标目录确实含 manifest.json，指错一层（src / 其它子目录）立即报错而非带病启动。
-function resolveExtDir() {
-  // 独立 skill 形态：扩展本体不在本 skill 内，默认路径由 paths.js 按候选推导
-  // （WB_CDP_EXT_DIR 显式 → ../cdp/extension → ../cdp-browser/extension → 报错）。
-  return _pathsResolveExtDir();
-}
-// 宿主一个探针 WS 端口：扩展 SW 的 5s rescan 会把它当 agent 拨入，
-// 认证通过且 role=extension 即证明 SW 活着（无需任何桥在运行）。
-// 返回 { promise: {detected, ms, port?, error?}, portReady }。
 async function main(argv = process.argv.slice(2)) {
   // 统一 CLI 子命令：discover / actions 直接委托 runner 程序（各自有自己的参数
   // 白名单与退出码语义）。必须在 parseArgs 之前拦截——全局 parseArgs 会吃掉
@@ -254,10 +252,16 @@ async function main(argv = process.argv.slice(2)) {
         channel = picked.channel;
         usedBridge = picked.bridge;
       } catch (error) {
-        if (error.code !== "NO_BRIDGE") throw error;
+        if (error.code !== "NO_BRIDGE" || ((opts.session || process.env.WB_SESSION) && !opts.allowFailover)) throw error;
       }
     }
     if (!channel) {
+      if ((opts.session || process.env.WB_SESSION) && !opts.allowFailover) {
+        const error = new Error("Selected session has no live bridge; refusing direct fallback");
+        error.code = "NO_BRIDGE";
+        throw error;
+      }
+      warnIfPortRangeOverridden(); // 直连慢路径也起监听端口等扩展拨入
       channel = await connectDirect(token, opts);
       if (candidates.length)
         console.error(

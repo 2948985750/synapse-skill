@@ -15,9 +15,8 @@ const {
   labelViolates,
   stateFileFor,
   localDate,
-  jsClickRect,
   loadProfile,
-  resolveEntry,
+  actionIdFromTitle,
   parseArgv,
 } = require("../runner/actions");
 
@@ -129,18 +128,19 @@ test("checkGuards: 昨天的计数不影响今日上限；external 拦截与 dry
 
 test("bumpState: 首次/同日累加/跨日清零，recent 留审计痕迹且封顶 10", () => {
   const first = bumpState(null, { to: "a@b.c" }, NOW);
-  assert.equal(first.count, 1);
-  assert.equal(first.countDate, "2026-11-01");
-  assert.equal(first.lastSuccessAt, NOW.toISOString());
+  assert.equal(first.navigationCount, 1);
+  assert.equal(first.navigationDate, "2026-11-01");
+  assert.equal(first.lastNavigationAt, NOW.toISOString());
+  assert.equal(first.lastSuccessAt, undefined);
   assert.deepEqual(first.recent, [{ at: NOW.toISOString(), params: { to: "a@b.c" } }]);
 
   const later = new Date("2026-11-01T10:05:00");
   const second = bumpState(first, { to: "d@e.f" }, later);
-  assert.equal(second.count, 2);
+  assert.equal(second.navigationCount, 2);
   assert.equal(second.recent.length, 2);
 
   const nextDay = bumpState(first, { to: "d@e.f" }, new Date("2026-11-02T09:00:00"));
-  assert.equal(nextDay.count, 1); // 跨日清零
+  assert.equal(nextDay.navigationCount, 1); // 跨日清零
 
   let s = null;
   for (let i = 0; i < 25; i++) s = bumpState(s, { i: String(i) }, new Date(2026, 10, 1, 10, i));
@@ -180,14 +180,6 @@ test("validateAction: guards.never 必须是数组；其他结构无需额外测
   assert.ok(errs.some((e) => e.includes("never")));
 });
 
-test("jsClickRect: 只读定位探针——scrollIntoView + 返回视口 rect，值经 JSON 内嵌", () => {
-  const expr = jsClickRect("div.row");
-  assert.ok(expr.includes("scrollIntoView"));
-  assert.ok(expr.includes("getBoundingClientRect"));
-  assert.ok(!expr.includes(".click()")); // 只定位不点击，点击由 Input 域做
-  assert.ok(expr.includes(JSON.stringify("div.row")));
-});
-
 test("镜像债：skill 侧不再有 DOM 交互构造器（全部归扩展侧 page-actions.js）", () => {
   const actions = require("../runner/actions");
   const gestures = require("../agent/gestures");
@@ -207,7 +199,7 @@ test("镜像债：skill 侧不再有 DOM 交互构造器（全部归扩展侧 pa
   assert.ok(typeof gestures.isAsyncAct === "function");
 });
 
-// ---------------- navigate 步骤 + entry 参数化 ----------------
+// ---------------- 结晶 URL 的 {param} 模板 ----------------
 
 test("validateAction: url 模板占位符合规范", () => {
   const ok = validateAction({
@@ -218,16 +210,6 @@ test("validateAction: url 模板占位符合规范", () => {
   assert.deepEqual(ok, []);
 });
 
-test("resolveEntry + expandParams: entry.url 的 {param} 模板可展开（douyin /video/{id}、xhs 用户页）", () => {
-  const { resolveEntry } = require("../runner/actions");
-  const e1 = resolveEntry({ entry: { url: "https://www.douyin.com/video/{id}" } }, "douyin.com");
-  assert.equal(expandParams(e1.url, { id: "7703162648518533247" }), "https://www.douyin.com/video/7703162648518533247");
-  const e2 = resolveEntry({}, "douyin.com"); // 无 entry → 域根
-  assert.equal(e2.url, "https://douyin.com/");
-  const e3 = resolveEntry({ entry: { url: "https://www.xiaohongshu.com/user/profile/{user_id}", waitMs: 4000 } }, "xiaohongshu.com");
-  assert.equal(e3.waitMs, 4000);
-});
-
 // ---------------- parseArgv / stateFileFor ----------------
 
 test("parseArgv: --param 值保持原始字符串不做类型猜测；旗标齐活", () => {
@@ -236,13 +218,12 @@ test("parseArgv: --param 值保持原始字符串不做类型猜测；旗标齐�
     "--param", "to=a@b.c",
     "--param", "num=00123",   // 前导零：必须还是字符串
     "--param", "s=x=y",        // 值里可以有 =（首个 = 才是分隔）
-    "--yes", "--dry", "--draft", "--timeout", "9999",
+    "--yes", "--dry", "--timeout", "9999",
   ]);
   assert.deepEqual(p.rest, ["mail.google.com", "send-mail"]);
   assert.deepEqual(p.params, { to: "a@b.c", num: "00123", s: "x=y" });
   assert.equal(p.yes, true);
   assert.equal(p.dry, true);
-  assert.equal(p.draft, true);
   assert.equal(p.timeoutMs, 9999);
   assert.throws(() => parseArgv(["--param", "noequals"]), /k=v/);
 });
@@ -255,56 +236,21 @@ test("stateFileFor: 落数据根 action-state/，domain/actionId 非法字符被
 
 // ---------------- 画像结构断言（漂移守卫） ----------------
 
-test("画像结构: 所有含 actions 的画像都是合法数据（title + url + guards）", () => {
-  const profilesRoot = path.join(__dirname, "..", "profiles");
-  const files = ["mail.google.com.json"];
-  const draftDir = path.join(profilesRoot, "draft");
-  for (const f of fs.existsSync(draftDir) ? fs.readdirSync(draftDir) : []) {
-    if (f.endsWith(".json")) files.push("draft/" + f);
-  }
-  let checked = 0;
-  for (const rel of files) {
-    const full = path.join(profilesRoot, rel);
-    if (!fs.existsSync(full)) continue;
-    const profile = JSON.parse(fs.readFileSync(full, "utf8"));
-    for (const action of profile.actions || []) {
-      checked++;
-      const errs = validateAction(action);
-      assert.deepEqual(errs, [], `${rel}#${action.title} schema: ` + errs.join("; "));
-    }
-  }
-  assert.ok(checked >= 1, "至少应检查到一个 action");
-});
-
-test("画像结构: send-mail action 存在且结构正确", () => {
-  const profilePath = path.join(__dirname, "..", "profiles", "mail.google.com.json");
-  if (!fs.existsSync(profilePath)) {
-    assert.ok(true, "mail.google.com.json 暂不存在，跳过");
-    return;
-  }
-  const profile = JSON.parse(fs.readFileSync(profilePath, "utf8"));
-  const a = profile.actions.find((x) => actionIdFromTitle(x.title) === "send-mail");
-  assert.ok(a, "send-mail 存在");
-  assert.equal(typeof a.title, "string");
-  assert.equal(typeof a.url, "string");
-  assert.ok(a.guards && typeof a.guards === "object");
-  // 护栏数字符合预期
-  assert.equal(a.guards.interval_s, 90);
-  assert.equal(a.guards.daily_cap, 40);
-  assert.equal(a.guards.side_effect, "external");
-});
-
-test("loadProfile: 从 profiles 根读取，--draft 走 draft/ 子目录", () => {
-  const profilePath = path.join(__dirname, "..", "profiles", "mail.google.com.json");
-  if (!fs.existsSync(profilePath)) {
-    assert.ok(true, "mail.google.com.json 暂不存在，跳过");
-    return;
-  }
-  const p = loadProfile("mail.google.com", false);
-  assert.equal(p.domain, "mail.google.com");
-  // draft 里的 gmail 是旧版（无 actions），只是确认能读
-  const d = loadProfile("mail.google.com", true);
-  assert.equal(d.domain, "mail.google.com");
+test("画像结构与读取: 使用隔离的纯数据画像，不依赖用户 profiles", (context) => {
+  const os = require("os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "synapse-action-profile-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fixture = {
+    domain: "example.test",
+    status: "ready",
+    actions: [{ title: "Send mail", url: "https://example.test/#/compose", guards: { side_effect: "external", interval_s: 90, daily_cap: 40 } }],
+  };
+  fs.writeFileSync(path.join(root, "example.test.json"), JSON.stringify(fixture));
+  const profile = loadProfile("example.test", root);
+  assert.deepEqual(profile, fixture);
+  assert.deepEqual(validateAction(profile.actions[0]), []);
+  assert.equal(actionIdFromTitle(profile.actions[0].title), "send-mail");
+  assert.throws(() => loadProfile("absent.test", root), /画像不存在/);
 });
 
 // ---------------- list 菜单（no-action → 结晶跳转台） ----------------

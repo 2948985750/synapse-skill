@@ -1,35 +1,37 @@
 #!/usr/bin/env node
 "use strict";
-// 动作结晶：把画像里实测跑通的 flows 沉淀成声明式 action（纯数据），由本通用解释器执行。
+// 动作结晶：把画像里实测跑通的任务沉淀成声明式 action（纯数据），由本通用解释器执行。
 //
-// 与 discover.js 同一立场：**画像不含可执行代码**。action 是数据（选择器/参数模板/
-// 等待条件/验证规则/护栏），解释是通用程序——和 discover.js 一样站在「通用程序」这一侧，
-// 信任边界（惰性数据，随便审阅拷贝）不破。与被退役的老 recipes 的区别不在「存不存动作」，
-// 而在三件事：
-//   1. 结晶式不手写式：agent 先即席跑通（flows 记录过程），跑通才沉淀成 action 数据
+// 与 discover.js 同一立场：**画像不含可执行代码**。action 是数据（title + url + guards：
+// url 可含 {param} 模板，同时承担入口与唯一步骤），解释是通用程序——和 discover.js
+// 一样站在「通用程序」这一侧，信任边界（惰性数据，随便审阅拷贝）不破。与被退役的
+// 老 recipes 的区别不在「存不存动作」，而在三件事：
+//   1. 结晶式不手写式：agent 先即席跑通并端到端验证，跑通才沉淀成 action 数据
 //      （带 verified 日期）；action 是「跑通路径的缓存」，不是「要预先维护的程序」。
-//   2. 断了有兜底：选择器漂移/页面改版 → 执行失败 → agent 即席接管完成本次任务，
-//      再回头修 action 数据。快路径省 token，慢路径保命，没有静默失败。
+//   2. 断了有兜底：URL 漂移/页面改版 → 导航失败 → exit 3 → agent 即席接管完成本次
+//      任务，再回头修 action 数据。快路径省 token，慢路径保命，没有静默失败。
 //   3. 护栏在本程序硬执行，不靠提示词自律：
 //        - guards.side_effect = "external" 的动作（发送/提交）必须 --yes 才真跑，
 //          --dry 永远只打印计划；
 //        - guards.interval_s / guards.daily_cap 落数据根 action-state/，
-//          只有 verify 全过才计数——半失败的发送不计入；
-//        - 每次点击前读目标元素的 text+aria-label，命中全局危险词（discover 的
-//          isDangerousLabel）或 action.guards.never → 立即中止，宁可误拦。
+//          只统计加载与最终 URL 已验证的导航，不统计业务成功；
+//        - guards.never 触发词黑名单随画像落盘（写类只结晶到就绪态，发送/提交等
+//          触发词进 never；匹配语义见 labelViolates 与全局危险词 discover 的
+//          isDangerousLabel），由 agent 在交互路径遵守，runner 不代点。
+//
+// 动作执行 = 校验 → 护栏 → 参数展开 → 导航到结晶 URL → 记状态。
 //
 // 用法：
-//   node runner/actions.js <domain> <actionId|list> [--param k=v ...] [--yes] [--dry] [--draft] [--timeout ms]
+//   node runner/actions.js <domain> <actionId|list> [--param k=v ...] [--yes] [--dry] [--timeout ms] [--session sid]
 //
-// Exit codes: 0 成功；1 用法/画像/action 校验失败；2 护栏拦截；3 执行/验证失败（agent 接管点）。
+// Exit codes: 0 成功；1 用法/画像/action 校验失败；2 护栏拦截；3 导航/执行失败（agent 接管点）。
 const fs = require("fs");
 const path = require("path");
 
 const { PROFILES_ROOT, DATA_ROOT } = require("../agent/paths");
 const { isDangerousLabel } = require("./discover");
 const { connect } = require("../agent/api");
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const { writeJsonAtomic } = require("../agent/lib/json-store");
 
 // ---------------- 纯函数（test-actions.js 直接测这些） ----------------
 
@@ -43,10 +45,6 @@ function expandParams(template, params) {
     return params[name];
   });
 }
-
-const STEP_OPS = ["click", "type", "wait", "navigate"];
-const TYPE_MODES = ["native", "native-enter", "execCommand"];
-const VERIFY_OPS = ["text", "exists", "navigate"];
 
 // schema 校验：宁可启动即报错，不可跑到一半才发现画像写错。
 // 返回错误消息数组（空 = 合法）。
@@ -99,7 +97,7 @@ function localDate(d = new Date()) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-// 护栏检查：interval（距上次成功）、daily_cap（今日次数）、external 动作要 --yes。
+// 护栏检查：interval（距上次导航）、daily_cap（今日导航次数）、external 动作要 --yes。
 // 返回 {ok, reasons}——reasons 是给人看的拦截原因。
 function checkGuards(action, state, now = new Date(), { yes = false } = {}) {
   const reasons = [];
@@ -108,22 +106,23 @@ function checkGuards(action, state, now = new Date(), { yes = false } = {}) {
   if (g.side_effect === "external" && !yes) {
     reasons.push('这是外发动作（guards.side_effect="external"），真跑必须加 --yes（先 --dry 看计划）');
   }
-  if (g.interval_s && st.lastSuccessAt) {
-    const last = new Date(st.lastSuccessAt);
+  if (g.interval_s && (st.lastNavigationAt || st.lastSuccessAt)) {
+    const last = new Date(st.lastNavigationAt || st.lastSuccessAt);
     if (!Number.isNaN(last.getTime())) {
       const elapsed = (now.getTime() - last.getTime()) / 1000;
       if (elapsed < g.interval_s) {
-        reasons.push(`距上次成功仅 ${Math.round(elapsed)}s，护栏要求间隔 >= ${g.interval_s}s`);
+        reasons.push(`距上次导航仅 ${Math.round(elapsed)}s，护栏要求间隔 >= ${g.interval_s}s`);
       }
     }
   }
-  if (g.daily_cap && st.countDate === localDate(now) && (st.count || 0) >= g.daily_cap) {
-    reasons.push(`今日已成功 ${st.count} 次，达到日上限 ${g.daily_cap}`);
+  const count = st.navigationDate === localDate(now) ? (st.navigationCount || 0) : (st.countDate === localDate(now) ? (st.count || 0) : 0);
+  if (g.daily_cap && count >= g.daily_cap) {
+    reasons.push(`今日已导航 ${count} 次，达到日上限 ${g.daily_cap}`);
   }
   return { ok: reasons.length === 0, reasons };
 }
 
-// 成功后推进状态：只有 verify 全过才调用（半失败不计入日上限/间隔）。
+// 导航就绪后推进状态，不写业务成功时间或次数。
 // recent 留最近 10 次参数作外发审计痕迹。
 function bumpState(state, params, now = new Date()) {
   const prev = state || {};
@@ -131,10 +130,10 @@ function bumpState(state, params, now = new Date()) {
   const recent = Array.isArray(prev.recent) ? prev.recent.slice(-9) : [];
   recent.push({ at: now.toISOString(), params: params || {} });
   return {
-    lastSuccessAt: now.toISOString(),
-    lastRunAt: now.toISOString(),
-    countDate: today,
-    count: prev.countDate === today ? (prev.count || 0) + 1 : 1,
+    ...prev,
+    lastNavigationAt: now.toISOString(),
+    navigationDate: today,
+    navigationCount: (prev.navigationDate === today ? (prev.navigationCount || 0) : (prev.countDate === today ? (prev.count || 0) : 0)) + 1,
     recent,
   };
 }
@@ -153,195 +152,107 @@ function stateFileFor(domain, actionId) {
   return path.join(DATA_ROOT, "action-state", `${safe(domain)}__${safe(actionId)}.json`);
 }
 
-// ---------------- 页内探针（只读表达式，参数用 JSON.stringify 内嵌，免引号地狱） ----------------
-
-// 真实鼠标点击的定位探针：scrollIntoView 后返回视口坐标（CDP Input.dispatchMouseEvent
-// 吃视口坐标）。WhatsApp 等站点对合成 el.click() 无反应（2026-11-01 A/B 实测，见
-// web.whatsapp 画像 antiScrape），必须走 Input 域真鼠标序列。
-// 保留：这是只读探针（返回坐标），点击由 CDP Input 域直接完成，不涉及扩展手势层。
-function jsClickRect(sel) {
-  return (
-    "(function(){var el=document.querySelector(" + JSON.stringify(sel) + ");" +
-    "if(!el)return null;" +
-    "try{el.scrollIntoView({block:'center'})}catch(e){};" +
-    "var r=el.getBoundingClientRect();" +
-    "if(r.width<1||r.height<1)return null;" +
-    "return {x:r.x,y:r.y,w:r.width,h:r.height}})()"
-  );
-}
-
 // ---------------- 运行时 ----------------
 
 function log(msg) {
   console.log("[action] " + msg);
 }
 
-async function pollUntil(fn, timeoutMs, gapMs = 500, tolerateError = false) {
-  const end = Date.now() + timeoutMs;
-  let lastErr = null;
-  for (;;) {
-    try {
-      const v = await fn();
-      if (v) return v;
-    } catch (e) {
-      lastErr = e;
-      if (!tolerateError) throw e;
-    }
-    if (Date.now() > end) {
-      const e = new Error("等待超时（" + timeoutMs + "ms）" + (lastErr ? "，最后错误: " + lastErr.message : ""));
-      e.code = "POLL_TIMEOUT";
-      throw e;
-    }
-    await sleep(gapMs);
-  }
-}
-
-function loadProfile(domain, draft) {
-  const file = path.join(PROFILES_ROOT, draft ? "draft" : "", `${domain}.json`);
+function loadProfile(domain, root = PROFILES_ROOT) {
+  if (!/^[a-zA-Z0-9.-]+$/.test(domain) || domain.includes("..")) throw new Error("非法画像域名");
+  const file = path.join(root, `${domain}.json`);
   if (!fs.existsSync(file)) {
     throw new Error(`画像不存在：${file}`);
   }
   return JSON.parse(fs.readFileSync(file, "utf8"));
 }
 
-// 入口解析（纯函数，可单测）：画像没给 entry 时退回「域根 + 8s 等待」。
-// entry.url 的 {param} 模板由调用方（main）负责展开——这里不碰 params。
-function resolveEntry(action, domain) {
-  const raw = action && action.entry;
-  if (raw && typeof raw.url === "string" && raw.url) {
-    const entry = { waitMs: 8000, ...raw };
-    return entry;
-  }
-  return { url: `https://${domain}/`, waitMs: 8000 };
-}
-
 function loadState(file) {
   try {
     return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch (_) {
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
     return null;
   }
 }
 
-// 复用同源标签（有就复用，没有就按 entry.url 开新的）——与 discover 的标签纪律一致。
-// 路径路由 SPA（如 creator.douyin.com）修正：entry.url 带具体路径且复用标签不在该
-// 路径时必须真导航，否则 steps/verify 全在旧页面上跑（2026-11-01 实测 upload action
-// 在 manage 页上 verify 超时）。entry 只带域（Gmail 式 "/"）维持旧"纯复用"行为，
+function acquireActionStateLock(file) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const lockFile = file + ".lock";
+  let descriptor;
+  try {
+    descriptor = fs.openSync(lockFile, "wx");
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    throw Object.assign(new Error("Action state is locked: " + lockFile + "; after a crash, verify no action is running before removing this lock"), { code: "ACTION_BUSY" });
+  }
+  try {
+    fs.writeSync(descriptor, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+  } catch (error) {
+    fs.closeSync(descriptor);
+    fs.unlinkSync(lockFile);
+    throw error;
+  }
+  return () => {
+    fs.closeSync(descriptor);
+    fs.unlinkSync(lockFile);
+  };
+}
+
+// 复用同源标签（有就复用，没有就按结晶 URL 开新的）——与 discover 的标签纪律一致。
+// 路径路由 SPA（如 creator.douyin.com）修正：url 带具体路径且复用标签不在该
+// 路径时必须真导航，否则后续操作全落在旧页面上（2026-11-01 实测 upload 任务
+// 在 manage 页上打转）。url 只带域（Gmail 式 "/"）维持旧"纯复用"行为，
 // 不折腾已打开的视图状态（如未发送的撰写窗口）。
 async function findOrOpenTab(browser, entry) {
   const entryUrl = new URL(entry.url);
-  const tabs = await browser.tabs();
-  for (const t of tabs) {
-    try {
-      if (t.url && new URL(t.url).origin === entryUrl.origin) {
-        const cur = new URL(t.url);
-        const entryPath = entryUrl.pathname + entryUrl.search;
-        const curPath = cur.pathname + cur.search;
-        if (entryPath !== "/" && entryPath !== curPath) {
-          await browser.call("navigate", {
-            tabId: t.tabId,
-            url: entry.url,
-            waitMs: entry.waitMs || 8000,
-          });
-        }
-        return { tabId: t.tabId, reused: true };
-      }
-    } catch (_) {}
+  if (!["http:", "https:"].includes(entryUrl.protocol)) throw new Error("action URL must use http(s)");
+  const deadline = Date.now() + (entry.waitMs || 8000);
+  const remaining = () => {
+    const budget = deadline - Date.now();
+    if (budget <= 0) throw Object.assign(new Error("Navigation deadline exceeded"), { code: "NAVIGATION_NOT_READY" });
+    return budget;
+  };
+  const tabs = await browser.tabs({ timeoutMs: remaining() });
+  const sameOrigin = tabs.filter((tab) => {
+    try { return new URL(tab.url).origin === entryUrl.origin; } catch (_) { return false; }
+  });
+  const existing = sameOrigin.find((tab) => new URL(tab.url).href === entryUrl.href) || sameOrigin[0];
+  if (existing) {
+    if (new URL(existing.url).href === entryUrl.href) return { tabId: existing.tabId, reused: true, navigated: false };
+    const budget = remaining();
+    const result = await browser.call("navigate", { tabId: existing.tabId, url: entry.url, waitMs: budget }, { commandTimeoutMs: budget });
+    if (result.loaded !== true) throw new Error("Navigation did not finish loading");
+    return { tabId: existing.tabId, reused: true, navigated: true };
   }
-  const opened = await browser.open(entry.url, { waitMs: entry.waitMs || 8000 });
-  return { tabId: opened.tabId, reused: false };
+  const budget = remaining();
+  const opened = await browser.open(entry.url, { waitMs: budget, timeoutMs: budget });
+  if (opened.loaded !== true) throw new Error("Navigation did not finish loading");
+  return { tabId: opened.tabId, reused: false, navigated: true };
 }
 
-async function queryInfo(browser, tabId, sel, timeoutMs) {
-  // 返回找到的元素 info（pollUntil 的返回值）；wait 型步骤只用它的"不抛错"语义，
-  // click/type 步骤靠这个返回值做禁用检查与点击前护栏读标签（2026-11-02 补 return：
-  // 之前漏写导致 click 步骤恒 undefined）。
-  return await pollUntil(async () => {
-    const v = await browser.queryEl(tabId, sel);
-    return v && v.found ? v : null;
-  }, timeoutMs, 400, true);
-}
-
-// 执行单步。返回 {skipped?:true}；失败抛错（带步骤上下文）。
-async function execStep(browser, tabId, st, stepTimeout) {
-  if (st.unless) {
-    const v = await browser.queryEl(tabId, st.unless);
-    if (v && v.found) return { skipped: true }; // 复用已存在的状态（如撰写窗口已开）
-  }
-  if (st.do === "wait") {
-    if (st.sel) await queryInfo(browser, tabId, st.sel, st.timeout || stepTimeout);
-    else await sleep(st.ms || 0);
-    return {};
-  }
-  if (st.do === "navigate") {
-    // URL 驱动导航（{param} 模板在 main 里已展开到 st._url）：受控搜索框（upwork/xhs）
-    // DOM 驱动无效，直接开 URL。同 entry 语义，复用浏览器既有 navigate（等 load）。
-    const url = st._url || st.url;
-    if (typeof url !== "string" || !url) throw new Error("navigate 步骤缺 url");
-    await browser.call("navigate", { tabId, url, waitMs: st.waitMs !== undefined ? st.waitMs : 8000 });
-    return {};
-  }
-
-  const info = await queryInfo(browser, tabId, st.sel, st.timeout || stepTimeout);
-  if (info.disabled) throw new Error(`目标被禁用（disabled）：${st.sel}`);
-  if (st.do === "click") {
-    // 点击前读文本+aria-label 过护栏——宁可误拦不可漏拦。
-    const label = (info.text + " " + info.aria).trim();
-    const hit = labelViolates(label, st._neverWords);
-    if (hit) {
-      const e = new Error(`点击目标命中危险词「${hit}」，已中止：${st.sel}（label="${label.slice(0, 60)}"）`);
-      e.code = "GUARD_BLOCKED";
-      throw e;
+async function executeNavigation(browser, action, params, timeoutMs = 180000) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("--timeout must be positive and finite");
+  const started = Date.now();
+  const deadline = started + timeoutMs;
+  const url = expandParams(action.url, params);
+  const tab = await findOrOpenTab(browser, { url, waitMs: timeoutMs });
+  let finalUrl = "";
+  while (Date.now() < deadline) {
+    const response = await browser.cdp(tab.tabId, "Runtime.evaluate", {
+      expression: "({url:location.href,readyState:document.readyState})",
+      returnByValue: true,
+    }, { timeoutMs: Math.min(20000, Math.max(1, deadline - Date.now())) });
+    const page = response?.result?.value;
+    finalUrl = page?.url || "";
+    if (page?.readyState === "complete" && finalUrl && new URL(finalUrl).href === new URL(url).href) {
+      return { ok: true, ...tab, ready: true, taskSucceeded: false, outcome: "navigation-ready", finalUrl, elapsedMs: Date.now() - started };
     }
-    if ((st.mode || "js") === "mouse") {
-      // CDP Input 域真鼠标序列：对合成 el.click() 无反应的站点（WhatsApp 会话行，
-      // 2026-11-01 A/B 实测）。offsetX/Y 相对元素左上角，省略 = 中心。
-      // 这是只读探针（返回视口坐标），仍走 run 通道。
-      const raw = await browser.run(tabId, jsClickRect(st.sel));
-      const rect = raw && raw.result ? raw.result.value : raw;
-      if (!rect || !rect.w) throw new Error(`定位失败（不可见或 0 尺寸）：${st.sel}`);
-      const px = rect.x + (st.offsetX !== undefined ? st.offsetX : rect.w / 2);
-      const py = rect.y + (st.offsetY !== undefined ? st.offsetY : rect.h / 2);
-      const move = { type: "mouseMoved", x: px, y: py, buttons: 0 };
-      const down = { type: "mousePressed", x: px, y: py, button: "left", buttons: 1, clickCount: 1 };
-      const up = { type: "mouseReleased", x: px, y: py, button: "left", buttons: 0, clickCount: 1 };
-      for (const params of [move, down, up]) await browser.cdp(tabId, "Input.dispatchMouseEvent", params);
-      return {};
-    }
-    await browser.gesture(tabId, "click", { sel: st.sel }, "");
-    return {};
+    await new Promise((resolve) => setTimeout(resolve, Math.min(200, Math.max(0, deadline - Date.now()))));
   }
-  // type
-  await browser.typeCss(tabId, st.sel, st._value, st.mode || "native");
-  return {};
-}
-
-async function runVerify(browser, tabId, verify, params, defaultTimeout) {
-  for (const [i, v] of (verify || []).entries()) {
-    if (v.op === "navigate") {
-      // fire-and-forget：reload 会销毁执行环境；之后轮询 href 直到包含 hash。
-      await browser.gotoHash(tabId, v.hash, v.reload !== false);
-      const waitMs = v.waitMs || defaultTimeout;
-      await pollUntil(async () => {
-        const raw = await browser.run(tabId, "location.href+'|'+document.readyState");
-        const s = raw && raw.result ? raw.result.value : "";
-        return typeof s === "string" && s.includes(v.hash) && s.endsWith("complete");
-      }, waitMs, 800, true);
-      log(`verify[${i}] navigate ${v.hash}${v.reload ? " + reload" : " "} 完成`);
-      continue;
-    }
-    const expect = v.op === "text" ? expandParams(v.expect, params) : v.expect;
-    await pollUntil(async () => {
-      if (v.op === "text") {
-        const raw = await browser.run(tabId, "document.body.innerText");
-        const t = raw && raw.result ? raw.result.value : "";
-        return typeof t === "string" && t.includes(expect);
-      }
-      const info = await browser.queryEl(tabId, v.sel);
-      return !!(info && info.found);
-    }, v.timeout || 12000, 600, true);
-    log(`verify[${i}] ${v.op}${v.op === "text" ? `「${expect.slice(0, 30)}」` : ""} 通过`);
-  }
+  const error = new Error("Target page is not ready at the declared URL: " + finalUrl);
+  error.code = "NAVIGATION_NOT_READY";
+  throw error;
 }
 
 // ---------------- main ----------------
@@ -349,7 +260,7 @@ async function runVerify(browser, tabId, verify, params, defaultTimeout) {
 function parseArgv(argv) {
   const rest = [];
   const params = {};
-  let yes = false, dry = false, draft = false, timeoutMs = 180000, session = "";
+  let yes = false, dry = false, timeoutMs = 180000, session = "", browserId = "", allowFailover = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--param") {
@@ -359,12 +270,22 @@ function parseArgv(argv) {
       params[kv.slice(0, at)] = kv.slice(at + 1);
     } else if (a === "--yes") yes = true;
     else if (a === "--dry") dry = true;
-    else if (a === "--draft") draft = true;
-    else if (a === "--timeout") timeoutMs = Number(argv[++i]) || timeoutMs;
-    else if (a === "--session") session = argv[++i] || "";
+    else if (a === "--timeout") {
+      timeoutMs = Number(argv[++i]);
+      if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("--timeout must be positive and finite");
+    }
+    else if (a === "--session") {
+      session = argv[++i];
+      if (!session || session.startsWith("--")) throw new Error("--session requires a session id");
+    }
+    else if (a === "--browser-id") {
+      browserId = argv[++i];
+      if (!browserId || browserId.startsWith("--")) throw new Error("--browser-id requires an identity from diag");
+    }
+    else if (a === "--allow-failover") allowFailover = true;
     else rest.push(a);
   }
-  return { rest, params, yes, dry, draft, timeoutMs, session };
+  return { rest, params, yes, dry, timeoutMs, session, browserId, allowFailover };
 }
 
 // ---------------- 画像动作菜单（agent 查现有动作；list 子命令） ----------------
@@ -390,15 +311,15 @@ function formatActionMenu(profile) {
     .join("\n");
 }
 
-async function main(argv) {
-  const { rest, params, yes, dry, draft, timeoutMs, session } = parseArgv(argv);
+async function main(argv, deps = {}) {
+  const { rest, params, yes, dry, timeoutMs, session, browserId, allowFailover } = parseArgv(argv);
   const [domain, actionId] = rest;
   if (!domain || !actionId) {
-    console.error("用法: node runner/actions.js <domain> <actionId|list> [--param k=v ...] [--yes] [--dry] [--draft] [--session sid] [--timeout ms]");
+    console.error("用法: node runner/actions.js <domain> <actionId|list> [--param k=v ...] [--yes] [--dry] [--session sid] [--timeout ms]");
     process.exit(1);
   }
 
-  const profile = await loadProfile(domain, draft);
+  const profile = await (deps.loadProfile || loadProfile)(domain);
   if (actionId === "list") {
     console.log(formatActionMenu(profile));
     process.exit(0);
@@ -425,7 +346,7 @@ async function main(argv) {
 
   // 护栏状态与检查。--dry 永不执行也不拦截退出码：它只如实展示「真跑会被什么拦」，
   // 拦截决定发生在真跑分支（--yes/interval/cap 在那里硬拦）。
-  const sFile = stateFileFor(domain, actionId);
+  const sFile = (deps.stateFileFor || stateFileFor)(domain, actionId);
   const state = loadState(sFile);
   const guard = checkGuards(action, state, new Date(), { yes });
   if (dry) {
@@ -446,24 +367,33 @@ async function main(argv) {
     process.exit(2);
   }
 
-  const neverWords = (action.guards && action.guards.never) || [];
-  const browser = await connect(session ? { session } : {});
+  if (profile.status === "draft") throw new Error("画像仍是 draft，请先人工审阅并确认后再执行");
+  const releaseStateLock = acquireActionStateLock(sFile);
+  let browser;
   const trace = [];
   try {
-    const url = expandParams(action.url, params);
-    const entry = { url, waitMs: 8000 };
-    const { tabId, reused } = await findOrOpenTab(browser, entry);
-    log(`tab ${tabId}${reused ? "（复用）" : "（新开）"} ← ${url}`);
-
+    const currentState = loadState(sFile);
+    const currentGuard = checkGuards(action, currentState, new Date(), { yes });
+    if (!currentGuard.ok) {
+      console.error("护栏拦截：" + currentGuard.reasons.join("; "));
+      process.exitCode = 2;
+      return;
+    }
     const started = Date.now();
-    log("导航 ✓");
-
-    // 只有导航成功才计数（护栏的间隔/日上限以成功为准）。
-    const next = bumpState(state, params);
+    browser = await (deps.connect || connect)({ ...(session ? { session } : {}), browserId, allowFailover, waitMs: timeoutMs, chainDeadlineMs: timeoutMs });
+    const remaining = timeoutMs - (Date.now() - started);
+    if (remaining <= 0) throw new Error("Action connection deadline exceeded");
+    const result = await executeNavigation(browser, action, params, remaining);
+    const now = new Date();
+    const next = {
+      ...bumpState(currentState, params, now),
+      lastNavigation: { params, finalUrl: result.finalUrl },
+    };
     fs.mkdirSync(path.dirname(sFile), { recursive: true });
-    fs.writeFileSync(sFile, JSON.stringify(next, null, 2) + "\n", "utf8");
-    log(`成功（${Date.now() - started}ms），状态已记 ${path.basename(sFile)}`);
-    console.log(JSON.stringify({ ok: true, tabId, elapsedMs: Date.now() - started }, null, 2));
+    (deps.writeState || writeJsonAtomic)(sFile, next);
+    log("页面已就绪；业务任务尚未执行或验证");
+    console.log(JSON.stringify(result, null, 2));
+    return result;
   } catch (e) {
     const out = {
       ok: false,
@@ -475,7 +405,11 @@ async function main(argv) {
     console.error(JSON.stringify(out, null, 2));
     process.exitCode = 3;
   } finally {
-    browser.close();
+    try {
+      if (browser) await browser.close();
+    } finally {
+      releaseStateLock();
+    }
   }
 }
 
@@ -486,7 +420,7 @@ if (require.main === module) {
   });
 }
 
-// ---------------- 测试出口（纯函数 + 表达式构造器可注入审计） ----------------
+// ---------------- 测试出口（纯函数） ----------------
 // main 必须导出：agent-collect.js 的统一 CLI 委托（actions 子命令）靠它进 main()
 module.exports = {
   main,
@@ -497,14 +431,11 @@ module.exports = {
   labelViolates,
   stateFileFor,
   localDate,
-  jsClickRect,
   loadProfile,
   loadState,
-  resolveEntry,
   parseArgv,
   actionIdFromTitle,
   formatActionMenu,
-  STEP_OPS,
-  TYPE_MODES,
-  VERIFY_OPS,
+  findOrOpenTab,
+  executeNavigation,
 };
