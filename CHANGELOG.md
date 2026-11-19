@@ -7,6 +7,56 @@
 
 ---
 
+### SKILL.md 两层渐进加载：采集细则切片 + 排障压缩（2026-11-20，未提交）
+
+- 现象：SKILL.md 29847 字节在技能触发时全量注入，其中「采集画像」段 5892 字符（34%）只有采集任务才需要——日常"用画像"会话白付；边界情况 15 条与故障转移 ~1900 字符属低频排障知识。
+- 修法：两层渐进加载（与 Agent Skills 的 metadata→正文→关联文件金字塔同构，BROWSER-RELIABILITY.md 已是先例）——①新建 `PROFILE-COLLECTION.md` 承接采集细则全文（总纲+三硬约束+全站流程+切分边界+字段表+结晶规约+步骤机+产物位置），SKILL.md 原段压成入口，触发条件写死"接到采集/结晶任务先读"；②边界情况 15 条压成 9 条单行体（索引/标签、capture/多标签各合并），故障转移压成一段；③commands.js 源头压缩 actions/discover 两行描述，usage:sync 重生成命令表。
+- 效果：SKILL.md 29847→20216 字节（-32%），日常会话每次触发省约 5K token；采集会话多付一次 PROFILE-COLLECTION.md 按需 Read（11584 字节）。红线/已知坑四坑/命令表全量保留，安全语义与操作面零损失。npm test 100/100 + verify 绿。
+
+### token 经济批次：CLI 输出/结构探针/画像文本三面瘦身（2026-11-20，未提交）
+
+- 现象：全链路三处与"画像省 token"目的相悖。①`collect-elements` 输出走全局两空格缩进 JSON，goofish 结果页 87 项实测 13381 字节——它是 agent 每次采集/即席都整块吃进上下文的批量清单；②`actions --dry` 把运行状态整体打印，其中 `recent[]`（最近 10 次导航参数）约 0.7KB、占 dry 输出近半，计划展示用不上；③`structure.lists` 存 parent/child 哈希 class 签名（如 `DIV.footer-item-wrap--WXJ8wp_N`）——站点改版即变、无法用于定位，纯噪声；另 goofish 画像 agent 补全的 verified/pageNotes/pending 写成长散文，违反既定"日期:短证据"短语约定（8897 字节）。
+- 修法：agent-collect.js 加 `renderResult()`——含 `items` 批量清单的输出走单行紧凑 JSON 并去本地时间戳 `ts`，其余命令保持缩进便于人工排障（runKeep 与 one-shot 两路同改）；runner/actions.js dry 状态打印剥掉 `recent`（侧车文件仍保留作外发审计痕迹）；discover.js `pruneStructure` 噪声过滤后把 lists 映射为 `{count,sample}`（探针与噪声判定不动，只瘦入库形状）；goofish 画像全文按短语约定重写、structure 同步新形。SKILL.md 采集章节补齐全链路模糊点（读/写/禁区三档分档、六拍实操循环、参数特例归并规则、verify 两条约束——纯导航不可带 verify + sel 唯一匹配、排除清单去向 excluded、覆盖率口径），README 步骤 2 同步口径，test-discover pruneStructure 断言改新形。
+- 效果：collect-elements 输出 13381→8993 字节（-33%）；`actions --dry` 1546→879 字节（-43%）；goofish 画像 8897→6526 字节（-27%，哈希签名约 1.1KB + 散文压缩约 1.3KB）。npm test 五组全绿（35/10/11/22/22）、verify 通过。
+
+### 移除画像元素清单 outline / clickables（2026-11-19，未提交）
+
+- 现象：discover 采集期冻结的 `pages[].outline`（可交互元素）与 `clickables`（可点容器）全仓零消费点——`actions.js` 完全不读，只有 discover 自己统计进 `digest`、单测自测。两者占画像 14686/16995 字符（86%），是纯体积负担。实证：结晶搜索 steps 时搜索框根本不在 outline 里（input 无文本节点被 shapeOutline 过滤），真实选择器 `input[class*=search-input]` 是 agent 用 `run` 探活真实 DOM 拿到的——outline 对组装 steps 零贡献。用户判断：采集时 agent 本就实时探活 DOM、跑通即组装 steps，无需冻结元素快照。
+- 修法：discover.js 删 `OUTLINE_PROBE_JS` / `shapeOutline` / `shapeClickables` 与 page 里的 outline/clickables 初始化、探针调用、buildSnapshot 透传；`buildDigest` 删 interactive/clickables 计数（源数据没了）；日志/CLI 输出改只报响应体数。`pages[]` 每项保留 `url`/`requestedAt`/`title`/`finalUrl`/`loginWall`/`structure`/`capture`——structure 留着供登录墙探测（passwordFields）与 digest 的 forms/lists 统计。test-discover 删两个整形测试、改 digest 键断言与 buildSnapshot 断言（改为钉死 outline/clickables 不入画像）。SKILL/README/commands.js 同步，`usage:sync` 再生成 SKILL 命令表。
+- 效果：goofish 画像从 16995 字节降到 2183（快照 16KB→1KB）；重采后 agent 用 `run` 实时探活拿选择器、当场结晶搜索 action，runner 两次实跑（q=机械键盘/降噪耳机）navigate→type→click 全过、verify 通过。npm test 五组全绿（35/10/11/22/22）。
+
+### 扁平化画像：删 snapshot 包装层与 chrome 归并（2026-11-19，未提交）
+
+- 现象：discover 已改单页采集，`buildSnapshot` 的"跨多页重复元素归并进 chrome"逻辑阈值按页数自适应，单页时 `threshold=Infinity`，chrome 恒为空——生产代码里的归并块是死代码。三个画像里只有改造前的 creator 遗留 5 条 chrome 独有导航（作品发布/首页/内容管理/收入变现/创作服务），其余两站 chrome 全空。`snapshot` 包装层（`capturedAt`/`chrome`/`skipped`）在代码里零消费点，只有测试与文档提及。
+- 修法：`buildSnapshot` 删归并块、改返回裸 `pages` 数组；`buildProfileSkeleton` 入参 `snapshot`→`pages`，顶层输出 `pages`（无 snapshot 层）；`buildDigest` 直接收 pages 数组（`snapshotKb` 保留字段名但改按 pages 序列化长度算）。三份画像把 `snapshot.pages` 提为顶层 `pages`，creator 的 5 条 chrome 导航塞回 `pages[0].outline` 避免丢数据。测试按新结构改写，SKILL/README/ONBOARDING/commands.js 同步。
+- 备注：`skipped` 局部变量保留（`loginRequired` 判断仍用），只是不再写进画像。
+
+### 移除画像 status / schemaVersion / fieldMap 字段（2026-11-19，未提交）
+
+- 现象：`status: draft/reviewed` 只有 discover 机械写 `draft`、actions 一处读 `draft`；`reviewed` 全仓零赋值，靠人工改字符串，且无枚举校验/状态机。用这个断层开关控制 AI 行为，与逐动作带证据的 `verified` / `guards` 准入体系对不上。`schemaVersion` 同样只有写出、零读取（除一条断言），不承载任何行为。`fieldMap` 的定位器与说明已在 `actions[].verified` / `on_fail` 中重复，保留两份会造成漂移。
+- 修法：discover 骨架与三个画像 JSON 删除 `status`、`schemaVersion`、`fieldMap`；actions 删除 draft 拦截；测试、README、SKILL、ONBOARDING、`agent/commands.js` 描述同步。字段定位统一写在 `pageNotes` 或 `actions[].on_fail`，准入仍由 `actions[].guards`、运行时最终 URL 核验与 agent 侧证据判断承担。
+- 未做：`validateAction` 尚未强制 `verified`（`creator.douyin.com` 的 actions 无该字段，强加会使其不可用），需单独定规则。
+
+### 移除画像 goal / updatedAt 字段（2026-11-19，未提交）
+
+- 现象：`goal` 被 discover 写死为 `"站点画像采集完成"`（完成状态陈述，与"采集目标/目的说明"的字段职能对不上），全仓零读取；三份画像里只有 creator 被 agent 改成了真实目标描述。`updatedAt` 与 `createdAt` 取同一个 `today`，产出即相等，全仓无任何代码更新它（goofish 的 ISO 时间戳是仓库外工具写入的痕迹）。两者均为程序写、无人读的占位字段。
+- 修法：discover 骨架与三个画像 JSON 删除 `goal`、`updatedAt`；SKILL.md 属性表同步删除两行，删掉不存在的 `interfaces` 段落与两处 `dataEndpoints` 悬空描述，整张表改为"代表什么事实/起什么作用"口径。CHANGELOG 历史记录里的旧字段名保留。
+
+### 变更：恢复 actions 的 steps 步骤机（2026-11-19，未提交）
+
+- 背景：现行 action 只有 {title, url, guards}，runner 导航到结晶 URL 即止（taskSucceeded:false），交互靠 agent 每次即席重做。闲鱼 `search-submit` 的 evidence 记录着"type-el 填词→cdp 点搜索"，但这套交互没进画像、runner 无法重放——搜索恰好能用 `?q=` 直达才算能批量，换个必须点击的功能这条 action 就是废物。旧实现（git `1a9f12e^`，click/type/wait/navigate 四原语 + verify）在 1a9f12e 简化结构时被删。
+- 修法：把 steps 步骤机合并回当前 runner（不整文件还原——旧版的 id/params/entry 必填、--draft、lastSuccessAt 计数、非原子写都已淘汰）：
+  1. `validateAction` 扩展 steps/verify 校验（缺席仍兼容纯导航）；交互原语全部走扩展桥命令（queryEl/click/typeCss/navigate/waitFor/gotoHash），skill 侧不复活被禁的 jsClick/jsType 构造器（镜像债测试仍绿）。
+  2. 每步可带 `ask`——风险步骤执行前 halt，exit 4 返回问题文本给 agent 向用户提问，`--confirmed` 确认后重跑才继续；确认不落盘、一次一确认。`unless` 幂等跳过，`guards.never` + 全局危险词在 click 前读 label 硬拦。
+  3. verify 全过才 taskSucceeded:true；纯导航路径完全不变。状态锁/原子写/browser-id 等现行改进保留。
+  4. dry 计划展示 steps/verify；退出码新增 4。文档（SKILL/README/ONBOARDING/commands.js 命令表）同步，测试新增 9 项（纯函数 + main 集成：steps 成功、ASK_USER halt）。
+- 提交：未提交。
+
+### 移除画像 snapshot.pages[].dangerous 字段（2026-11-19，未提交）
+
+- 现象：discover 采集时对元素标签跑危险词表，把命中的（如"支付宝"命中"支付"、"付款完成则代表同意"命中"付款"，全是误报）写进 `snapshot.pages[].dangerous`。这是采集期的静态词匹配清单，全仓零代码读取，误报率高且只留档不拦截。风险标记的归属应在未来 steps 批处理里做步骤级识别并向用户提问，不该在画像里单开一段。
+- 修法：discover 删除采集期两段危险词扫描与 `page.dangerous` 初始化、`buildSnapshot` 的透传（连带只服务于扫描的 `collectElements` 调用）；三个画像 JSON 删除该段；SKILL.md/README 描述同步，test-discover 夹具去字段并加"dangerous 不入画像"守卫。`isDangerousLabel` 词表保留——`actions.js` 的 `labelViolates` 依赖它做运行时点击护栏。CHANGELOG 历史记录里的旧提及保留。
+
 ### 可靠性审查补修（2026-11-06，未提交）
 
 - 修复子会话网络请求仅按 requestId 合并、取体丢失 sessionId：元信息、缓存、即时/兜底取体按完整会话身份隔离，保留原主会话缓存键兼容。

@@ -39,7 +39,7 @@
 | `api.js` | 程序用库入口（connect → tabs/open/run/collectElements/click/type/cdp） |
 | `lib/json-store.js` | JSON 读写 + 原子写（tmp + rename） |
 | `lib/ui.js` | stdout JSON 出口与错误归一化 |
-| `runner/discover.js` | 通用采集程序：有界发现 → 画像（元素快照 + 响应体 + 知识骨架，纯数据） |
+| `runner/discover.js` | 通用采集程序：有界发现 → 画像（结构证据 + 响应体 + 知识骨架，纯数据） |
 
 ## 安装
 
@@ -63,8 +63,7 @@ skill 装进任何 agent 客户端（.zcode/.agents/vendored）相对锚都成�
 | 内容 | 位置 | 随谁走 | 入库 |
 |---|---|---|---|
 | skill 安装位置（代码/文档/测试） | `<SKILL_ROOT>/` | SKILL_ROOT | git |
-| 正式画像（运行时） | `<SKILL_ROOT>/profiles/*.json`（纯数据，无采集代码） | SKILL_ROOT | 视用户决定 |
-| 待审画像（`status: draft`） | 同 `<SKILL_ROOT>/profiles/`，靠 `status` 字段区分 | SKILL_ROOT | 视用户决定 |
+| 站点画像（运行时） | `<SKILL_ROOT>/profiles/*.json`（纯数据，无采集代码） | SKILL_ROOT | 视用户决定 |
 | 采集产物 | `<DATA_ROOT>/output/<domain>/<task>.json` | DATA_ROOT | 否 |
 | 桥注册表 / 维护锁 / 日志 | `<DATA_ROOT>/bridges` 等 | DATA_ROOT | 否 |
 | config.json | 固定平台默认目录（与 dataRoot 解耦，防循环依赖） | — | 否 |
@@ -117,12 +116,12 @@ CLI 侧也做了同样的收口：`click-el <tab> <i>`、`type-el <tab> <i> <tex
 
 ## 站点画像（纯数据）
 
-`profiles/` 存站点画像：**纯数据文件（.json，schemaVersion 3）**——`digest`（各段规模
-目录）+ `snapshot`（瘦身元素快照，响应体仅 `--capture` 时存在）+ 站点知识
-（fieldMap / limits / antiScrape / pageNotes / actions / pending）。
-画像里**不含任何可执行采集代码**：采集动作是通用程序（`runner/discover.js` 的单页富快照）
-与 agent 的即席桥命令（open / collect-elements / run / capture）；字段怎么取写在 `fieldMap` /
-`pageNotes` 里作描述，抽取逻辑由 agent 按现场 DOM 即席写，不存进画像。画像是惰性数据
+`profiles/` 存站点画像：**纯数据文件（.json）**——`digest`（各段规模
+目录）+ 顶层 `pages[]`（每页结构证据，响应体仅 `--capture` 时存在，无元素清单/无 snapshot 包装/无 chrome 归并）+ 站点知识
+（limits / antiScrape / pageNotes / actions / pending）。
+画像里**不含任何可执行采集代码**：采集动作是通用程序（`runner/discover.js` 的单页结构快照）
+与 agent 的即席桥命令（open / collect-elements / run / capture）；字段怎么取写在
+`pageNotes` / `actions[].on_fail` 里作描述，抽取逻辑由 agent 按现场 DOM 即席写，不存进画像。画像是惰性数据
 ——随便审阅、随便拷贝，没有"加载即执行"的信任边界。
 
 ## 测试
@@ -159,27 +158,30 @@ node runner/discover.js --url https://site.com --session <sid>            # 单�
 node runner/discover.js --url https://site.com --capture --session <sid>  # 按需加抓响应体
 ```
 
-硬守卫写死（同源 / 危险词只记不点 / 表单不提交 / 单页不跟链接——页间跳转由 agent 交互
+硬守卫写死（同源 / 危险词点击前拦截并向用户提问 / 表单不提交 / 单页不跟链接——页间跳转由 agent 交互
 观测补全）。产物**只有一个**：`<PROFILES_ROOT>/<domain>.json`——顶层 `digest` 段是各段
-规模目录（pages/interactive/clickables/forms/lists/responseBodies/snapshotKb，~10 行）；
-采集快照在 `snapshot` 段：每页只含**可交互元素**（`interactive:true` 的 outline）与
-`clickables`、结构线索（已剔 SVG 图元）与响应体（仅 `--capture` 时存在）；跨页重复的
-站点框架归并进 `snapshot.chrome` 一份。知识字段为空待 agent 补。不存在独立的材料包/报告文件。
+规模目录（pages/forms/lists/responseBodies/snapshotKb，~10 行）；
+页面证据在顶层 `pages[]`：每页只含结构线索（表单/列表/密码框，已剔 SVG 图元；列表只留
+`count`+`sample` 文本样例，哈希 class 签名不存）与响应体（仅 `--capture` 时存在）。
+不冻结元素清单——agent 用 `collect-elements`/`run` 实时探活 DOM，跑通的操作直接结晶进
+`actions[].steps`。扁平结构，无 `snapshot` 包装层、无跨页框架归并。知识字段为空待 agent 补。
+不存在独立的材料包/报告文件。
 
-1. **读目录 → 读快照**：先看顶层 `digest` 段（各段规模）定盘子，再按需开 `snapshot.pages[0]`
+1. **读目录 → 读快照**：先看顶层 `digest` 段（各段规模）定盘子，再按需开 `pages[0]`
    与 `capture`（仅 `--capture` 时存在），不整文件吞读；超预算响应体带 `shape`+512B 样例
 
-2. **圈功能清单**：路由簇（`limits.routes`）+ 导航类 clickables + 页标题交叉定主功能；
-   `/legal`/`/blog`/营销页是噪音；登录墙路由记 pending 不强进；
-   危险动作（保存/投递/支付）只记进快照 `dangerous`/`pending`，永不代执行。
+2. **圈功能清单**：用 `collect-elements` 实时枚举可交互元素，配合结构线索（表单/列表）与页标题交叉定主功能；
+   `/legal`/`/blog`/营销页是噪音（排除清单写顶层 `excluded`）；登录墙路由记 pending 不强进。
+   分档：**读类**（浏览/搜索/查看）实操结晶；**写类**（发布/编辑/发消息）只到就绪态、提交挂 `ask`；
+   **禁区**（支付/下单/账号安全）记 `pending` 永不代执行。
+   结晶按用户意图切分边界——能单独触发、单独出结果的功能各自成条（如搜索与筛选分开），
+   前一步产物是后一步入口时用 url 模板衔接，已有 action 的参数特例归并不独立成条；
+   详见 SKILL.md「采集画像」。
 3. **补知识字段**（写进画像，全是数据不写代码）：
-   - `fieldMap`：主取法优先语义属性（`[data-test=…]`），哈希 class 不可靠；字段埋在
-     大文本里就写清"哪段文本 + 什么形态正则"；
    - `limits`：首屏条数、分页是否真有效（**必须实试，别信文档**）；
    - `antiScrape`：现象 + 触发 + 缓解 + 实测证据；`pageNotes` 照填（接口记录约定见
      SKILL.md「接口记录」：每条只留 `url` + 中文用途说明）。
-4. **汇报请人审**（功能清单 + 知识要点 + 覆盖率 + pending）；通过即置 `status: reviewed`；
-   是否 git 提交由用户定。
+4. **汇报请人审**（功能清单 + 知识要点 + 覆盖率 + pending）；是否 git 提交由用户定。
 
 #### 单功能补画像
 
@@ -204,11 +206,14 @@ node runner/discover.js --url https://site.com --capture --session <sid>  # 按�
 - `CDP_TIMEOUT` 表示执行结果未知，扩展不会重发表达式；调用方应先检查页面，避免重复执行有副作用的操作。
 - 页内 JavaScript 异常返回 `EVALUATION_FAILED`，保留异常原因，不自动重试。此规则覆盖内建 DOM 命令和 CLI/SDK 的 CDP 执行结果；`query-el` 正常查无元素仍返回 `found:false`。SDK `run(tabId, expression, { timeoutMs })` 同时约束 CDP 等待和命令期限；超时不能证明页面脚本已经停止。
 
-### 导航动作结果
+### 动作结果
 
-`actions` 是纯 JSON 导航入口，不执行完整业务工作流。拒绝 `status:draft` 画像；验证加载完成与最终 URL（包含 query/hash），只返回 `outcome:"navigation-ready", ready:true, taskSucceeded:false`。exit 0 代表页面就绪，不代表发信/提交/支付等业务完成。登录重定向、加载超时或路由不符不会记成功。
+`actions` 有两种形态：
 
-导航次数记在 `lastNavigationAt` / `navigationDate` / `navigationCount`，间隔/日限额按导航检查；旧成功计数只作兼容读取，不再增加。状态采用原子写入与同 action 锁，避免并发突破限额。进程异常退出后如有残留 `.lock`，确认没有动作运行再手动移除该锁。SDK/CLI capture 均默认采集 12000ms，时长须为有限正数。
+- **纯导航**（只有 title/url/guards）：验证加载完成与最终 URL（含 query/hash），返回 `outcome:"navigation-ready", ready:true, taskSucceeded:false`。exit 0 代表页面就绪，不代表业务完成。
+- **带 steps/verify**：先导航就绪，再按 `steps[]` 逐步执行交互（`click`/`type`/`wait`/`navigate`，走扩展桥命令，skill 侧不造页内 JS），`verify[]` 全过后返回 `taskSucceeded:true, outcome:"steps-verified"`。带 `ask` 的风险步 halt 返回 exit 4 与问题文本，用户确认后加 `--confirmed` 重跑；确认不落盘，一次一确认。
+
+登录重定向、加载超时或路由不符不会记成功。导航次数记在 `lastNavigationAt` / `navigationDate` / `navigationCount`，间隔/日限额按导航检查；旧成功计数只作兼容读取，不再增加。状态采用原子写入与同 action 锁，避免并发突破限额。进程异常退出后如有残留 `.lock`，确认没有动作运行再手动移除该锁。SDK/CLI capture 均默认采集 12000ms，时长须为有限正数。
 
 ## 相关仓库
 

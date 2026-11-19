@@ -67,13 +67,15 @@ agent/paths.js           根目录解析（env > config.json > 平台默认）�
 agent/doctor.js          链路体检与等待重连（不杀浏览器、不清 profile、不重启）
 agent/api.js             程序用库 connect()→browser.tabs/collectElements/click/type/cdp（绕 shell）
 agent/gestures.js        L2 手势真源（见 §2 逐字同步守卫）
-profiles/                纯数据画像（无采集代码！）：*.json = reviewed；待审画像同目录，靠
-                         `status: draft` 字段区分（无 draft/ 子目录）
-runner/discover.js       单页画像采集 → 写 profiles/<domain>.json（危险词只记不点）
-runner/actions.js        结晶动作解释器（title+url+guards 纯数据；执行=校验→护栏→参数展开
-                         →导航→验证加载与最终 URL→记导航状态）；拒绝 draft；
-                         external 必须 --yes、--dry 只打印，never 由 agent 交互路径遵守
-                         exit 0 仅页面就绪，taskSucceeded:false；1 一般错 / 2 护栏 / 3 导航失败
+profiles/                纯数据画像（无采集代码！）：<domain>.json；无草稿/正式状态区分
+                         （无 draft/ 子目录、无 status 字段）
+runner/discover.js       单页画像采集 → 写 profiles/<domain>.json（风险标记交给 steps 步骤级提问）
+runner/actions.js        结晶动作解释器（title+url+guards 纯数据，可选 steps/verify；
+                         纯导航=校验→护栏→参数展开→导航→核验 URL→记状态；
+                         带 steps=导航后再按 click/type/wait/navigate 逐步交互 + verify）；
+                         external 必须 --yes、--dry 只打印、ask 步待确认用 --confirmed
+                         exit 0 成功（纯导航 taskSucceeded:false / 带 steps 为 true）；
+                         1 一般错 / 2 护栏 / 3 执行失败 / 4 风险步待用户确认
 test/                    npm test 串跑，包括隔离画像、路由与运行时回归测试
 .tmp/                    scratch（结晶会话临时产物），gitignore，无视
 ```
@@ -92,8 +94,8 @@ cli.js gestureCmd/buildCmd → transport.connectBridgeChain（找到已连入的
 **结晶循环**：
 
 ```
-即席采集/discover → profiles/<domain>.json（status:draft，digest+snapshot+知识骨架）
-  → 人工审阅 + 跑通任务回写 actions[] → status:reviewed 正式画像
+即席采集/discover → profiles/<domain>.json（digest+顶层 pages+知识骨架）
+  → 人工审阅 + 跑通任务回写 actions[] → 可消费的画像
   → 下次用 runner/actions 打开入口：--dry 核计划，exit 0 仅表示导航就绪，业务结果单独验证
 ```
 

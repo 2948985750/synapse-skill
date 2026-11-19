@@ -41,9 +41,9 @@ chrome.debugger 支持的 CDP 域）：读渲染 DOM、点选/输入、跑页内
 - **点选与输入**：`click-el`/`type-el` 两个基础动词，加 13 个手势——悬停、双击、长按、
   右键、拖拽、滚动、下拉选、快捷键、触屏滑动、文本选中、媒体控制等（扩展 0.16.0+）
 - **捕获接口响应**：`capture` 抓页面自身 XHR/fetch 的响应体（复用登录态，不重放）
-- **站点画像**：`profiles/*.json` 纯数据——元素快照 + 站点知识（`fieldMap`/`limits`/
-  `antiScrape`/`dataEndpoints`）+ 已结晶 `actions`，可审阅可拷贝
-- **复用导航入口**：画像里的 `actions` 负责导航、护栏与页面就绪核验；业务交互由 agent 后续执行并另行验证，外发/提交等操作仍需用户授权。`--yes` 只放行标为 external 的导航入口，不证明业务完成。
+- **站点画像**：`profiles/*.json` 纯数据——页面结构证据（`structure`/`capture`）+ 站点知识（`limits`/
+  `antiScrape`/`pageNotes`）+ 已结晶 `actions`，可审阅可拷贝。元素清单不入库：agent 用 `collect-elements`/`run` 实时探活 DOM
+- **复用已结晶动作**：画像里的 `actions` 两种形态——纯导航（title+url+guards）只做导航与就绪核验；带 `steps`/`verify` 的可按序重放交互（click/type/wait/navigate）并验证结果。护栏硬执行，风险步骤用 `ask` 标记、runner 停下来向用户提问（`--confirmed` 确认后继续）。外发/提交仍需用户授权，`--yes` 只放行 external，不证明业务完成。
 
 所有操作经本机 WS 服务 + 扩展透传 CDP 执行；派发的是合成事件（`isTrusted:false`），
 `cdp` 仅能调用 `chrome.debugger` 支持的 CDP 域与目标；`run` 受页面权限与浏览器限制。
@@ -66,86 +66,26 @@ chrome.debugger 支持的 CDP 域）：读渲染 DOM、点选/输入、跑页内
    不占桥命令。语义匹配（如"发邮件"→`send-mail`）→ 走结晶快路径：先经统一入口
    `node agent/agent-collect.js actions <domain> <actionId> --param k=v … --dry` 核计划，
    缺参数**问用户要、不编**；外发类（`side_effect=external`）经用户确认后才加 `--yes`
-   真跑。runner 仅导航并检查页面加载与最终 URL；`ready:true, taskSucceeded:false` 只代表入口就绪，不代表邮件已发送、表单已提交或业务任务完成。draft 画像必须先经人工审阅；跑完如实报告输出。查某域有哪些动作：
+   真跑。**纯导航 action**（无 steps）：runner 只检查页面加载与最终 URL，`ready:true,
+   taskSucceeded:false` 仅代表入口就绪，不代表业务完成。**带 steps/verify 的 action**：runner
+   按序重放交互并核验，`taskSucceeded:true` 代表 verify 全过；遇到 `ask` 步骤会 halt（exit 4）
+   返回问题，向用户确认后加 `--confirmed` 重跑。跑完如实报告输出。查某域有哪些动作：
    `node agent/agent-collect.js actions <domain> list`（只列菜单，不读整个 JSON）。
 2. **动作失败不硬重试**：exit 2（护栏拦截）——如实告知用户被什么拦了，别绕；
+   exit 4（风险步待确认）——把 `ask` 问题转述给用户，同意后加 `--confirmed` 重跑，拒绝就停；
    exit 3（导航/执行失败）——即席接管完成本次任务（即席接管本身仍守「永不代执行」
    红线：保存/投递/支付/退出登录只给出入口和步骤，由用户手动做），成功后把跑通的
-   参数化步骤**回写**进该 action（更新 url 里的选择器/参数模板）——结晶修复循环。
+   步骤**回写**进该 action 的 `steps[]`（选择器漂移就更新选择器）——结晶修复循环。
 3. **没有匹配动作**（`list` 菜单里没有对应标题派生的 id；直接调用时 runner exit 1 会附
    结晶指引）：即席执行（桥命令 + 画像知识）。**结晶步骤**：任务跑通并端到端验证后，
-   把参数化步骤写进该画像 `actions[]`（只保留 `title` + `url`（可含 `{param}` 模板）+
-   可选 `guards`；写类只到就绪态，触发词进 `guards.never`）——让下次走快路径。是否结晶
+   把参数化步骤写进该画像 `actions[]`（写类只到就绪态，触发词进 `guards.never`）——让下次走快路径。是否结晶
    看任务性质：采集任务全功能都结晶（见下节），日常任务重复才结晶、一次性低价值不结晶。
 
 ### 采集画像
 
-用户说「采集 xx 站」「补全 xx 站画像」「把所有站画像跑一遍」时：
+采集画像 = 程序出骨架（`runner/discover.js` 只读探针，产出 `pages[]` 证据骨架）+ agent 当场实操结晶（跑通的功能把操作序列参数化成 `steps`+`verify` 写进 `actions[]`）。**接到采集/结晶任务，先读本目录 `PROFILE-COLLECTION.md`**——全站采集流程、字段表、切分边界、结晶规约、steps 步骤机、verify 约束的完整版都在那里。
 
-**怎么启动**（采集与结晶都走统一 CLI 子命令）：
-
-- 整站采集：`node agent/agent-collect.js discover --url https://site.com --session <sid>`——**只开入口页**
-  取单页富快照（全部可交互元素，**含 SPA 跳转容器**：cursor:pointer/onClick/role=link，
-  不止 `<a>`；+ 结构）。**不自动跟链接翻页**：页间跳转 / 路由发现
-  由 LLM 交互观测补全（`click-el` 触发 → 观察 `location` 变化 → 记进画像知识）。
-  产物落画像根 `<domain>.json`：`digest`（各段规模目录）+ `snapshot`（瘦身元素快照）
-  + 知识骨架（知识字段空着等 agent 补）；同源/JSON 响应体仅在 `--capture` 时抓
-  （默认关闭，按需）；
-- 单功能补画像：不用 discover，直接 `open` + `collect-elements` 即席（桥命令，见本节
-  「单功能补画像」）；
-- 执行已结晶动作：`node agent/agent-collect.js actions <domain> <actionId> --param k=v …`
-  （消费侧，见「用画像」）。
-
-**完成标准（强制行为，不是可选项）**：出画像 ≠ 采集完成。收到画像后 LLM **必须**对
-功能清单逐项做交互实验（点跳转容器 → 观测 location/新面板/新请求 → 端到端验证），验证
-通过的读类功能**必须**结晶进 `actions[]`；写类功能停在就绪态（触发词进 `guards.never`）；
-验证不了的进 `pending[]`（带原因 + 证据）。`actions[]` 为空且没有 `pending[]` 说明 =
-**采集未完成**，不得汇报为完成；汇报必须附功能覆盖率表（已结晶 / pending / 不覆盖）。
-
-1. **先圈全功能清单**：discover 产出后，把路由、clickables、页标题三者交叉比对，
-   把站点**所有**功能圈进来（读类：搜索/浏览/详情/作者/会话…；写类：发送/投递/发布/
-   私信/下单…），登录墙/危险路由记录不强进。
-2. **每个功能即席交互到端到端验证，通过才结晶进 `actions[]`**（`verified` 带日期与证据、
-   `on_fail`、`guards` 含 never）。**覆盖单位是"功能"不是"一条链"**——只做了搜索链、
-   没做浏览/详情/作者 = 采集未完成；写类/外发功能**只走到不可逆步骤前**：执行到
-   「就绪态」（写信窗打开/表单填好/入口验证过）即止并验证，最终触发词记进
-   `guards.never`、永不代点（见「红线与排障」）。
-3. **验证不了的功能进 `pending[]`**（原因 + 证据 + `action_when_*` 提示），不静默跳过；
-   反爬信号（CF/验证码/429）立即停记不硬闯；同站点间动作串行、导航间隔 ≥3s，多站点可并行。
-4. **汇报以功能清单为基准**：每个功能标「已结晶 / pending(原因) / 不覆盖(原因)」，
-   请人审时给覆盖率；git 提交与否由用户定。
-
-**知识字段**（站点知识，纯描述数据，不写采集逻辑）：`fieldMap` 主取法
-优先语义属性（`[data-test=…]`），哈希 class 不可靠；`limits` 记首屏条数与分页是否真有效
-（**必须实试，别信文档**）；`antiScrape` 记现象/触发/缓解/实测证据。
-
-**接口记录**（仅在用户点名要接口数据、或 DOM 读不到必须采集时才记；默认不记）：
-`interfaces` 为数组，每条只留两个键——`url`（接口地址）+ `for`（中文用途说明，如"通
-知列表，count=20"）。**不记**：GraphQL hash、完整参数串、响应体、请求头。hash 会随版
-本漂，记了就是噪音；用途一句话说明白就够。
-
-**读画像两步协议**：先读画像顶层 `digest` 段（各段规模，~10 行：pages/interactive/
-clickables/forms/lists/responseBodies/snapshotKb）定盘子，再按需开 `snapshot`（元素
-清单）与 `capture`（仅 `--capture` 时存在）段；超预算响应体看 `shape` + 512B 样例即可，
-不整文件吞读。
-
-**单功能补画像**
-
-1. `open` + `collect-elements`，用功能词匹配链接文本/按钮 label/tab/placeholder；
-   **匹配不到 → 带证据回问用户**（哪个页面、看到哪些候选），不猜；
-2. 命中 → 只探这一条子树：`click-el` 进入、搜索类 `type-el` 填词提交、验证渲染。
-   **接口默认不采集**：`capture` 只在用户点名「要接口数据」、或 DOM 读不到（shadow DOM/
-   接口才是真数据源）时才跑，跑一次定位数据源即停；跑通靠 DOM 的功能不挂 capture；
-3. 判数据源、把观察填进对应知识字段（字段条目见上「知识字段」），**并把这个功能的
-   交互链结晶进画像 `actions[]`**（`verified` 带日期与证据；写类停就绪态、触发词进
-   `guards.never`；结晶不了进 `pending[]` 带原因）；
-4. 已有正式画像 → 追加进该画像；没有 → 新建待审画像（`status: draft`）请人审后合并。
-
-**产物位置**：加工与结果全部写入画像根（`config` 输出的 `profilesRoot`，默认
-`<SKILL_ROOT>/profiles/`）下的 `<domain>.json`；只有 `config set profile-root` 或
-`WB_PROFILES_DIR` 能整体重定位。读取侧同理：正式画像在画像根 `<domain>.json`，待审
-画像（`status: draft`）也放在画像根，由 status 字段区分。本机安装位是 junction
-（`~/.zcode/skills/synapse-skill` → 源码仓），所以画像直接落源码仓 `profiles/`。
+硬约束三条，采集全程适用：定位一律 `{sel}` 唯一选择器（query-el 多命中 AMBIGUOUS，结晶 verify 前实测匹配数==1）；写类只结晶到就绪态、提交动作挂 `ask`；禁区（支付/下单/账号安全）永不实操、记 `pending` 带入口。跑不通的进 `pending[]` 带原因；`actions[]`/`pending[]` 随采集当场写入、当场定稿。
 
 ### 红线与排障
 
@@ -157,7 +97,7 @@ clickables/forms/lists/responseBodies/snapshotKb）定盘子，再按需开 `sna
   由 runner 硬拦。
 - 用画像执行任务时**不主动抓接口**：不额外跑 `capture` 分析页面 XHR/fetch。
   接口知识是**生产侧**的事，且**仅当用户点名要接口数据**（或 DOM 读不到、接口才是真
-  数据源）时才采集——用户没提接口，画像里就不留 `dataEndpoints`，别自作主张。
+  数据源）时才采集——用户没提接口就别抓，别自作主张。
 
 **已知坑**：
 - CDP 键入必须用 `Input.dispatchKeyEvent type:"char"`（rawKeyDown 带 text 不落字）。
@@ -167,32 +107,18 @@ clickables/forms/lists/responseBodies/snapshotKb）定盘子，再按需开 `sna
   `{"type":"function","value":{}}` 取不到值。
 - 合成 Ctrl+C 不进剪贴板；复制流随后 `run` `document.execCommand('copy')`。
 
-**边界情况**：
-- **页面未渲染完**：collect-elements/run 结果为空或明显偏少 → 等 1–2 秒重试，仍空就 navigate
-  重载一次；不要把"没加载出来"当作"没有功能"。
-- **索引失效**：collect-elements 的索引只在当次有效；导航/刷新/页面更新后必须重新 collect-elements。
-  click-el/type-el 返回 `found:false` 或 label 漂移时重抓索引，不要猜。
-- **标签失效**：`No tab with given id` = 标签被关或浏览器重启过——重 `list` 拿新 tabId，
-  别对着旧 id 硬试（标签是动态的，测试期间也可能被用户关掉）。
-- **CDP 超时**：`CDP_TIMEOUT` 表示已派发命令的执行结果未知，禁止自动重发可能有副作用的操作。先检查页面与 `diag`；弹窗只记录，不自动确认、不覆盖原生 confirm/prompt。需要处理时按用户明确决定调用 `Page.handleJavaScriptDialog`（`accept` 与可选 `promptText`）。没有弹窗不等于已确认主线程卡死；关闭/重开标签可能丢失未保存内容，先告知用户。
-- **登录墙/登录过期**：出现登录表单或跳转登录页 → 请用户手动登录；不代填密码/验证码，
-  不伪造 cookie。
-- **反爬信号**（验证码、`_security_check`、429/5xx 频发）：停止重试、拉大间隔（≥2s），
-  带证据报告；不尝试绕过验证码。
-- **跨源 iframe**：主文档读不到内容时用 `open-frame` 把匹配的子帧开成顶层标签再操作。
-- **懒加载/虚拟列表**：只渲染可视区 → 先滚动再 collect-elements；"加载更多"按文本找可点容器。
-- **capture 抓不到请求**：只能抓会话开始后触发的请求；先开 capture（或 reload）再执行
-  动作，最后 wait。
-- **多标签抓包**：`capture-many` 的 tabId 必须互不相同；同 tab 同 client 的 capture 会话互斥。
-- **能力之外**（无头运行、批量多账号、绕过验证码/风控、破解付费内容）：直接说明做不到，
-  给替代方案。
-- **出错时**：先跑 `diag` 取诊断，把原始错误和证据带给用户；不编造结果。
+**边界情况**（共性铁律：出错先跑 `diag` 取诊断，把原始错误和证据带给用户，不编造结果）：
+- **页面未渲染**：collect-elements/run 结果空或偏少 → 等 1–2 秒重试，仍空 navigate 重载；别把"没加载"当"没功能"。
+- **索引/标签失效**：索引只在当次有效，导航/刷新后重抓，`found:false` 或 label 漂移别猜；`No tab with given id` = 标签被关或浏览器重启，重 `list` 拿新 tabId。
+- **CDP 超时**：`CDP_TIMEOUT` = 结果未知，禁止自动重发有副作用的操作；弹窗只记录不自动确认，处理按用户明确决定调 `Page.handleJavaScriptDialog`；关标签可能丢未保存内容，先告知。
+- **登录墙**：请用户手动登录；不代填密码/验证码，不伪造 cookie。
+- **反爬信号**（验证码/`_security_check`/429、5xx 频发）：停止重试、拉大间隔（≥2s）、带证据报告；不绕过验证码。
+- **跨源 iframe**：主文档读不到用 `open-frame` 把子帧开成顶层标签。
+- **懒加载/虚拟列表**：先滚动再 collect-elements；"加载更多"按文本找可点容器。
+- **capture 时序**：只能抓会话开始后的请求——先开 capture（或 reload）再动作；`capture-many` 的 tabId 必须互不相同。
+- **能力之外**（无头/批量多账号/绕风控/破付费）：直接说明做不到，给替代方案。
 
-**故障转移与健康**：
-`--session`/`WB_SESSION` 严格限定目标桥，失联报 `NO_BRIDGE`，不跨会话或回落直连；跨会话必须显式 `--allow-failover`。未指定会话时按最新活桥尝试，必要时等待直连。多浏览器/profile 操作应先核实 `diag.browserId`，用 `--browser-id` 或 `WB_BROWSER_ID` 固定目标；不匹配报 `BROWSER_MISMATCH`，业务命令不下发。该本机标识不是认证凭据，清扩展存储/重装后需要重新确认。
-- 桥活但扩展假死：`bridgeAlive:true + extension:null` → 跑 `doctor`。
-- `doctor`：快查 → 轮询活桥等待重连（默认 60s）；超时只报告人工恢复步骤。不会杀进程、清 profile 缓存或启动浏览器；`--force` 只跳过等待，`--dry` 只快查，旧 `--force-kill` 会报错。
-- 导航记录使用 `lastNavigationAt` / `navigationCount`，不会新增业务成功记录。状态采用原子写入与同 action 互斥锁；异常退出残留 `.lock` 时，先确认没有动作运行，再手工移除该锁，不删画像或 profile。
+**故障转移与健康**：`--session`/`WB_SESSION` 严格限定目标桥（失联报 `NO_BRIDGE`，跨会话须显式 `--allow-failover`）；未指定按最新活桥尝试。多浏览器先核实 `diag.browserId`，用 `--browser-id` 固定（不匹配报 `BROWSER_MISMATCH`，业务命令不下发）；browserId 是本机路由标识非认证凭据。桥活扩展假死（`bridgeAlive:true + extension:null`）→ 跑 `doctor`：只诊断+轮询重连（默认 60s，`--force` 跳过等待，`--dry` 只快查），不杀进程不清缓存，超时报告人工步骤。状态原子写入+同 action 互斥锁；残留 `.lock` 先确认无动作运行再手工移除，不删画像。
 
 ## 命令
 
@@ -202,7 +128,7 @@ clickables/forms/lists/responseBodies/snapshotKb）定盘子，再按需开 `sna
 | `read-page` | `<tabId> ['<options-json>'\|@file]` | 按 scope 读取区域文本；maxChars 默认 4000；options 可传 contextId/sessionId。 |
 | `wait-for` | `<tabId> '<condition-json>'\|@file` | 等待 locator 的 visible/hidden/attached/detached、text/value 或精确 url；默认 10 秒，超时不重复动作。 |
 | `click-cdp` | `<tabId> <i\|el-json>` | 检查可见性、遮挡和位置稳定后发送 CDP 鼠标输入；失败不自动回退为 DOM 点击。 |
-| `actions` | `<domain> <actionId\|list> [--param k=v ...] [--dry] [--yes] [--timeout ms] [--session sid] [--browser-id id] [--allow-failover]` | 声明式导航入口（title+url+guards）：拒绝 draft；--dry 只打印计划，external 必须 --yes；验证加载完成与最终 URL（含 hash），exit 0 仅表示页面就绪，返回 taskSucceeded:false，不代表业务任务完成。间隔/日上限限制导航次数；never 由 agent 在交互路径遵守；list 列菜单；exit 1 用法校验 / 2 护栏拦截 / 3 导航失败 |
+| `actions` | `<domain> <actionId\|list> [--param k=v ...] [--dry] [--yes] [--confirmed] [--timeout ms] [--session sid] [--browser-id id] [--allow-failover]` | 声明式动作（title+url+guards，可选 steps/verify）：纯导航只核验就绪（taskSucceeded:false）；带 steps 按 click/type/wait/navigate 逐步交互，verify 全过才 true。ask 步骤 exit 4 停下问用户，--confirmed 放行（一次一确认）；--dry 只打印计划；外发必须加 --yes。exit 1 用法 / 2 护栏 / 3 执行失败 / 4 待确认；list 列菜单 |
 | `attach` | `<tabId>` | 手动把调试器附加到标签——桥执行命令时会自动 attach，这条只做排障用 |
 | `capture` | `<tabId> <url\|reload\|wait> [--duration ms] [--filter <re>] [--body-max kb] [--all]` | 网络响应体捕获：触发导航/重载后抓该标签的 XHR/fetch 请求 + 响应体 |
 | `capture-many` | `<tabId:action> [<tabId:action> ...] [--duration ms] [--filter <re>] [--body-max kb] [--all]` | 多标签并行网络捕获：不同 tab 各开一个 capture session，tabId 必须互不相同（同 tab + 同 client 的 capture session 互斥）；action 同 capture |
@@ -213,7 +139,7 @@ clickables/forms/lists/responseBodies/snapshotKb）定盘子，再按需开 `sna
 | `dblclick-el` | `<tabId> <i\|el-json> [--label <text>]` | 按 collect-elements 索引双击：mousedown/up×2 + click(detail2) + dblclick；注意小红书/抖音等媒体卡片双击=点赞，此类站点慎用 |
 | `detach` | `<tabId>` | 解除标签上的调试器，attach 之后想彻底释放用这条 |
 | `diag` | `—` | 诊断快照：日志环形缓冲、最近弹窗记录、capture 会话状态——排障第一步 |
-| `discover` | `--url <entry> [--dwell-ms 4000] [--settle-ms 2500] [--keep-tab] [--force] [--capture] [--session sid]` | 整站盘点（画像采集，单页富快照）：只开入口页，采全部可交互元素（含 SPA 跳转容器：cursor:pointer/onClick/role=link，不止 <a>）+ 结构；不自动跟链接翻页——页间跳转/路由由 LLM 交互观测补全；产物唯一：<PROFILES_ROOT>/<domain>.json，含 digest（规模目录）+ snapshot（瘦身元素快照）+ 知识骨架；--capture 默认关闭、按需抓同源/JSON 响应体；--force 覆盖已有画像（整文件重写：已结晶的 actions 与知识字段一并丢失，先备份再跑） |
+| `discover` | `--url <entry> [--dwell-ms 4000] [--settle-ms 2500] [--keep-tab] [--force] [--capture] [--session sid]` | 画像采集（单页结构快照）：只开入口页采结构探针+响应体；不冻结元素清单、不自动跟链接——选择器与页间跳转由 agent 实时探活补全。产物唯一：<PROFILES_ROOT>/<domain>.json（digest+顶层 pages[]+知识骨架）。--capture 默认关；--force 整文件重写（已结晶 actions 与知识字段丢失，先备份再跑） |
 | `doctor` | `[--wait <ms>] [--force] [--dry]` | 只诊断与轮询活桥等待扩展重连（默认 60s），不杀进程、不清 profile 缓存、不重启浏览器；--force 跳过等待，--dry 只快查；--force-kill 已移除并会报错。超时报告需要人工检查目标会话与扩展 |
 | `drag-el` | `<tabId> <from-i\|json> <to-i\|json>` | HTML5 拖放全序列（dragstart→dragenter/dragover→drop→dragend，带 DataTransfer）；from/to 均为 collect-elements 索引，目标 label 漂移会拒绝 |
 | `focus-el` | `<tabId> <i\|el-json> [--label <text>]` | 聚焦元素（target.focus()）；返回值 active 表示是否成为当前 activeElement |

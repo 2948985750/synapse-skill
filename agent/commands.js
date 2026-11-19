@@ -17,8 +17,8 @@ const COMMANDS = [
   {
     name: "actions",
     lines: [
-      "actions <domain> <actionId|list> [--param k=v ...] [--dry] [--yes] [--timeout ms] [--session sid] [--browser-id id] [--allow-failover]",
-      "声明式导航入口（title+url+guards）：拒绝 draft；--dry 只打印计划，external 必须 --yes；验证加载完成与最终 URL（含 hash），exit 0 仅表示页面就绪，返回 taskSucceeded:false，不代表业务任务完成。间隔/日上限限制导航次数；never 由 agent 在交互路径遵守；list 列菜单；exit 1 用法校验 / 2 护栏拦截 / 3 导航失败",
+      "actions <domain> <actionId|list> [--param k=v ...] [--dry] [--yes] [--confirmed] [--timeout ms] [--session sid] [--browser-id id] [--allow-failover]",
+      "声明式动作（title+url+guards，可选 steps/verify）：纯导航只核验就绪（taskSucceeded:false）；带 steps 按 click/type/wait/navigate 逐步交互，verify 全过才 true。ask 步骤 exit 4 停下问用户，--confirmed 放行（一次一确认）；--dry 只打印计划；外发必须加 --yes。exit 1 用法 / 2 护栏 / 3 执行失败 / 4 待确认；list 列菜单",
     ],
   },
   {
@@ -92,7 +92,7 @@ const COMMANDS = [
     name: "discover",
     lines: [
       "discover --url <entry> [--dwell-ms 4000] [--settle-ms 2500] [--keep-tab] [--force] [--capture] [--session sid]",
-      "整站盘点（画像采集，单页富快照）：只开入口页，采全部可交互元素（含 SPA 跳转容器：cursor:pointer/onClick/role=link，不止 <a>）+ 结构；不自动跟链接翻页——页间跳转/路由由 LLM 交互观测补全；产物唯一：<PROFILES_ROOT>/<domain>.json，含 digest（规模目录）+ snapshot（瘦身元素快照）+ 知识骨架；--capture 默认关闭、按需抓同源/JSON 响应体；--force 覆盖已有画像（整文件重写：已结晶的 actions 与知识字段一并丢失，先备份再跑）",
+      "画像采集（单页结构快照）：只开入口页采结构探针+响应体；不冻结元素清单、不自动跟链接——选择器与页间跳转由 agent 实时探活补全。产物唯一：<PROFILES_ROOT>/<domain>.json（digest+顶层 pages[]+知识骨架）。--capture 默认关；--force 整文件重写（已结晶 actions 与知识字段丢失，先备份再跑）",
     ],
   },
   {
