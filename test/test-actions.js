@@ -18,6 +18,11 @@ const {
   loadProfile,
   actionIdFromTitle,
   parseArgv,
+  execStep,
+  runVerify,
+  STEP_OPS,
+  TYPE_MODES,
+  VERIFY_OPS,
 } = require("../runner/actions");
 
 // ---------------- expandParams ----------------
@@ -242,7 +247,6 @@ test("画像结构与读取: 使用隔离的纯数据画像，不依赖用户 pr
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const fixture = {
     domain: "example.test",
-    status: "ready",
     actions: [{ title: "Send mail", url: "https://example.test/#/compose", guards: { side_effect: "external", interval_s: 90, daily_cap: 40 } }],
   };
   fs.writeFileSync(path.join(root, "example.test.json"), JSON.stringify(fixture));
@@ -267,4 +271,102 @@ test("formatActionMenu: 列 id/标题/side_effect；空画像给结晶指引", (
   assert.ok(menu.includes("发信") && menu.includes("external"));
   assert.ok(menu.includes("阅读") && menu.includes("local"));
   assert.ok(formatActionMenu({ domain: "y.com", actions: [] }).includes("结晶"));
+});
+
+// ---------------- steps 步骤机 ----------------
+
+test("validateAction: steps/verify 合法结构零错误；缺席仍兼容纯导航", () => {
+  const errs = validateAction({
+    title: "搜索",
+    url: "https://a.com/search?q={q}",
+    steps: [
+      { do: "wait", sel: "input[type=text]" },
+      { do: "type", sel: "input[type=text]", value: "{q}", mode: "native" },
+      { do: "click", sel: "button[type=submit]" },
+      { do: "navigate", url: "https://a.com/result" },
+      { do: "click", sel: ".risky", ask: "确认要提交吗？" },
+    ],
+    verify: [{ op: "text", expect: "结果" }, { op: "exists", sel: ".result" }],
+  });
+  assert.deepEqual(errs, []);
+  // 纯导航（无 steps/verify）仍合法
+  assert.deepEqual(validateAction({ title: "x", url: "https://a.com" }), []);
+});
+
+test("validateAction: steps 坏结构被抓（未知 do、缺 sel、坏 mode、ask 空）", () => {
+  const errs = validateAction({
+    title: "x", url: "https://a.com",
+    steps: [
+      { do: "frobnicate" },
+      { do: "click" },
+      { do: "type", sel: "input", value: "x", mode: "bogus" },
+      { do: "wait" },
+      { do: "click", sel: ".x", ask: "   " },
+    ],
+  });
+  assert.ok(errs.some((e) => e.includes("未知")));
+  assert.ok(errs.some((e) => e.includes("sel 必填")));
+  assert.ok(errs.some((e) => e.includes("mode 未知")));
+  assert.ok(errs.some((e) => e.includes("wait 需要")));
+  assert.ok(errs.some((e) => e.includes("ask 必须是非空")));
+});
+
+test("validateAction: verify 单给无 steps 报错；verify 坏 op 被抓", () => {
+  assert.ok(validateAction({ title: "x", url: "https://a.com", verify: [{ op: "text", expect: "x" }] })
+    .some((e) => e.includes("需要同时提供 steps")));
+  assert.ok(validateAction({ title: "x", url: "https://a.com", steps: [{ do: "wait", ms: 1 }], verify: [{ op: "bogus" }] })
+    .some((e) => e.includes("op 未知")));
+});
+
+test("STEP_OPS/TYPE_MODES/VERIFY_OPS: 白名单导出", () => {
+  assert.deepEqual(STEP_OPS, ["click", "type", "wait", "navigate"]);
+  assert.ok(TYPE_MODES.includes("native") && VERIFY_OPS.includes("exists"));
+});
+
+// execStep：用假 browser 记录调用，验证原语派发与风险拦截
+function fakeBrowser(overrides = {}) {
+  const calls = [];
+  return {
+    calls,
+    queryEl: async (tab, sel) => { calls.push(["queryEl", sel]); return { found: true, text: "", aria: "", disabled: false }; },
+    click: async (tab, el, o) => { calls.push(["click", el, o]); return {}; },
+    typeCss: async (tab, sel, value, mode) => { calls.push(["typeCss", sel, value, mode]); return {}; },
+    navigate: async (tab, url, o) => { calls.push(["navigate", url]); return {}; },
+    ...overrides,
+  };
+}
+
+test("execStep: ask 步未确认抛 ASK_USER；确认后放行执行", async () => {
+  const b = fakeBrowser();
+  const st = { do: "click", sel: ".submit", ask: "确认提交？" };
+  await assert.rejects(execStep(b, 1, st, {}, 1000, false), (e) => e.code === "ASK_USER" && e.ask === "确认提交？");
+  // 未确认时不得派发点击
+  assert.ok(!b.calls.some((c) => c[0] === "click"));
+  const r = await execStep(b, 1, st, {}, 1000, true);
+  assert.deepEqual(r, {});
+  assert.ok(b.calls.some((c) => c[0] === "click"));
+});
+
+test("execStep: click 命中危险词护栏中止，不发点击", async () => {
+  const b = fakeBrowser({ queryEl: async () => ({ found: true, text: "立即删除", aria: "", disabled: false }) });
+  await assert.rejects(
+    execStep(b, 1, { do: "click", sel: ".del", _neverWords: [] }, {}, 1000),
+    (e) => e.code === "GUARD_BLOCKED" && e.message.includes("删除"),
+  );
+  assert.ok(!b.calls.some((c) => c[0] === "click"));
+});
+
+test("execStep: type 展开参数走 type-css；unless 已存在则跳过", async () => {
+  const b = fakeBrowser();
+  await execStep(b, 1, { do: "type", sel: "input", value: "{q}", _value: "手机壳" }, {}, 1000);
+  assert.ok(b.calls.some((c) => c[0] === "typeCss" && c[2] === "手机壳"));
+  const b2 = fakeBrowser();
+  const r = await execStep(b2, 1, { do: "click", sel: ".x", unless: ".compose-form" }, {}, 1000);
+  assert.equal(r.skipped, true);
+  assert.ok(!b2.calls.some((c) => c[0] === "click"));
+});
+
+test("parseArgv: --confirmed 旗标解析", () => {
+  assert.equal(parseArgv(["x.com", "a", "--confirmed"]).confirmed, true);
+  assert.equal(parseArgv(["x.com", "a"]).confirmed, false);
 });

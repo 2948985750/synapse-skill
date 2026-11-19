@@ -12,8 +12,6 @@ const {
   buildSnapshot,
   pruneStructure,
   pruneCapture,
-  shapeOutline,
-  shapeClickables,
 } = require("../runner/discover");
 
 test("isDangerousLabel: CJK includes, ASCII word-boundary, false positives stay null", () => {
@@ -46,58 +44,6 @@ test("clusterByPathPrefix groups by first 2 path segments", () => {
   assert.deepEqual(c["/feed"], ["https://a.com/feed"]);
 });
 
-test("shapeOutline: dedup with count, drops empties, caps and keeps first-seen order", () => {
-  const raw = [
-    { sig: "A.nav#home", text: "首页", interactive: true, href: "https://a.com/" },
-    { sig: "A.nav#jobs", text: "职位", interactive: true, href: "https://a.com/jobs" },
-    { sig: "A.nav#home", text: "首页", interactive: true, href: "https://a.com/" },
-    { sig: "H1.title", text: "  找工作\n平台  ", interactive: false },
-    { sig: "DIV.card", text: "", interactive: false }, // 空文本丢弃
-    null, // 非对象丢弃
-    { sig: "DIV.hot", text: "热榜", interactive: false, cursorPointer: true },
-  ];
-  const out = shapeOutline(raw);
-  assert.equal(out.length, 4);
-  assert.deepEqual(
-    out.map((i) => i.text),
-    ["首页", "职位", "找工作 平台", "热榜"], // 换行空白归一
-  );
-  assert.equal(out[0].count, 2); // 同签名同文本合并计次
-  assert.equal(out[0].href, "https://a.com/");
-  assert.equal(out[3].cursorPointer, true);
-  assert.equal("cursorPointer" in out[2], false);
-
-  // 双上限：max=可交互上限，maxText=非交互文本上限；截断按"首次出现"记账
-  const capped = shapeOutline(raw, { max: 1, maxText: 1 });
-  assert.deepEqual(capped.map((i) => i.text), ["首页", "找工作 平台"]);
-  const big = [
-    ...Array.from({ length: 201 }, (_, i) => ({ sig: "B" + i, text: "b" + i, interactive: true })),
-    ...Array.from({ length: 61 }, (_, i) => ({ sig: "T" + i, text: "t" + i, interactive: false })),
-  ];
-  const capped2 = shapeOutline(big);
-  assert.equal(capped2.length, 260); // 200 交互 + 60 文本
-  assert.equal(capped2[200].text, "t0");
-  assert.equal(capped2[259].text, "t59");
-});
-
-test("shapeClickables: dedup, drops empties, caps, keeps href", () => {
-  const raw = [
-    { sig: "DIV.job-card", text: "Senior Engineer  $50/hr", href: "https://a.com/jobs/1" },
-    { sig: "DIV.job-card", text: "Product Designer $30/hr" }, // 不同文本不合并
-    { sig: "DIV.job-card", text: "Senior Engineer $50/hr", href: "https://a.com/jobs/1" }, // 空白归一后与前一条同键 → 去重
-    { sig: "DIV.banner", text: "" }, // 空文本丢弃
-    null,
-  ];
-  const out = shapeClickables(raw);
-  assert.equal(out.length, 2);
-  assert.deepEqual(out.map((i) => i.sig), ["DIV.job-card", "DIV.job-card"]);
-  assert.deepEqual(out.map((i) => i.text), ["Senior Engineer $50/hr", "Product Designer $30/hr"]);
-  assert.equal(out[0].href, "https://a.com/jobs/1"); // 可点容器的跳转地址随条目保留
-  assert.ok(!("href" in out[1]));
-  assert.equal(shapeClickables(raw, { max: 1 }).length, 1);
-  assert.deepEqual(shapeClickables("nope"), []);
-});
-
 test("isInside: containment guard rejects escape and cross-drive, accepts equal and nested", () => {
   const root = "D:\\repo\\profiles";
   assert.equal(isInside(root, "D:\\repo\\profiles\\a.json"), true);
@@ -111,85 +57,71 @@ test("isInside: containment guard rejects escape and cross-drive, accepts equal 
   assert.equal(isInside(root, "D:\\repo\\profiles\\.\\x.json"), true); // "." 归一后仍在锚内
 });
 
-test("buildProfileSkeleton: knowledge profile with embedded snapshot (no code fields)", () => {
-  const snapshot = {
-    capturedAt: "2026-10-26T00:00:00.000Z",
-    chrome: { outline: [], clickables: [] },
-    pages: [
-      {
-        url: "https://a.com/",
-        outline: [{ sig: "A", text: "首页", interactive: true }],
-        clickables: [{ sig: "DIV.card", text: "卡片" }],
-        structure: { forms: [{ action: "/x" }], lists: [{ count: 3 }] },
-        capture: { requests: [{ url: "https://a.com/api", body: '{"k":1}' }] },
-      },
-    ],
-    skipped: [{ url: "https://b.com/", reason: "cross-origin" }],
-  };
+test("buildProfileSkeleton: 扁平画像顶层 pages（无 snapshot 包装/无代码字段）", () => {
+  const pages = [
+    {
+      url: "https://a.com/",
+      structure: { forms: [{ action: "/x" }], lists: [{ count: 3 }] },
+      capture: { requests: [{ url: "https://a.com/api", body: '{"k":1}' }] },
+    },
+  ];
   const d = buildProfileSkeleton({
     domain: "a.com",
     entry: "https://a.com/",
     visited: ["https://a.com/"],
     observations: { loginRequired: false, limits: { pagesVisited: 1 } },
-    snapshot,
+    pages,
   });
-  assert.equal(d.schemaVersion, 3);
-  assert.equal(d.status, "draft");
   assert.ok(!("recipes" in d) && !("replay" in d), "画像不得含采集代码字段");
-  assert.deepEqual(d.fieldMap, {});
   assert.deepEqual(d.pageNotes, []);
   assert.ok(Array.isArray(d.actions), "actions start empty");
   assert.ok(Array.isArray(d.pending), "pending start empty");
-  // 采集快照进画像（无独立材料包）——1a9f12e 曾误删此接线，这里钉死
-  assert.equal(d.snapshot, snapshot);
+  // pages 扁平挂在画像顶层，无 snapshot 包装、无 chrome 归并
+  assert.equal(d.pages, pages);
+  assert.ok(!("snapshot" in d), "不再有 snapshot 包装层");
   assert.ok(!("discovery" in d), "discovery 中间块不入画像");
   // digest 目录段：只承载各段规模，不承载业务信号
   assert.equal(d.digest.pages, 1);
-  assert.equal(d.digest.interactive, 1);
-  assert.equal(d.digest.clickables, 1);
   assert.equal(d.digest.forms, 1);
   assert.equal(d.digest.lists, 1);
   assert.equal(d.digest.responseBodies.returned, 1);
   assert.equal(typeof d.digest.snapshotKb, "number");
+  assert.ok(!("interactive" in d.digest), "元素清单已移除，interactive 计数不再有来源");
+  assert.ok(!("clickables" in d.digest), "元素清单已移除，clickables 计数不再有来源");
   assert.deepEqual(
     Object.keys(d.digest).sort(),
-    ["clickables", "forms", "interactive", "lists", "pages", "responseBodies", "snapshotKb"],
-    "digest 收窄为目录档：接口家底/危险词/跳过记录仍由 LLM 进 snapshot 段自己看",
+    ["forms", "lists", "pages", "responseBodies", "snapshotKb"],
+    "digest 收窄为目录档：接口家底/危险词仍由 LLM 进 pages 段自己看",
   );
 });
 
-test("buildSnapshot: 只留可交互元素，跨页框架归并 chrome，links/controls 不入画像", () => {
+test("buildSnapshot: 无元素清单，不做 chrome 归并，links/controls/dangerous 不入画像", () => {
   const mk = (url, extra = []) => ({
     url, depth: 1, requestedAt: "t", title: "", finalUrl: url, loginWall: false,
     enqueued: [], structure: { lists: [], forms: [], passwordFields: 0 },
-    dangerous: [], links: [{ href: "https://a.com/x" }], controls: [{ i: 0 }],
-    outline: [
-      { sig: "A", text: "首页", interactive: true },
-      { sig: "H1", text: "标题", interactive: false },
-      ...extra,
-    ],
+    links: [{ href: "https://a.com/x" }], controls: [{ i: 0 }],
+    outline: [{ sig: "A", text: "首页", interactive: true }, ...extra],
     clickables: [{ sig: "DIV.card", text: "卡片" }],
     capture: null,
   });
   const pages = [mk("https://a.com/1"), mk("https://a.com/2"), mk("https://a.com/3")];
-  const snap = buildSnapshot(pages, { origin: "https://a.com", skipped: [] });
-  // 纯文本元素被筛掉；交互元素保留（本页只有被归并的"首页"）
-  assert.deepEqual(snap.pages[0].outline, []);
-  // "A|首页" 与 clickables 在 3 页都出现 → 归并进 chrome
-  assert.equal(snap.chrome.outline.length, 1);
-  assert.equal(snap.chrome.outline[0].text, "首页");
-  assert.equal(snap.chrome.outline[0].pages, 3);
-  assert.equal(snap.chrome.clickables.length, 1);
-  assert.equal(snap.pages[0].outline.length, 0);
-  assert.equal(snap.pages[0].clickables.length, 0);
+  const out = buildSnapshot(pages);
+  // 返回裸数组，无 snapshot/chrome 包装
+  assert.ok(Array.isArray(out));
+  assert.equal(out.length, 3);
+  assert.ok(!("chrome" in out[0]) && !("snapshot" in out[0]));
+  // 元素清单不冻结进画像：agent 用 collect-elements/run 实时探活
+  assert.ok(!("outline" in out[0]), "outline 不入画像");
+  assert.ok(!("clickables" in out[0]), "clickables 不入画像");
   // 中间量不入画像
-  assert.ok(!("links" in snap.pages[0]) && !("controls" in snap.pages[0]));
+  assert.ok(!("links" in out[0]) && !("controls" in out[0]));
+  assert.ok(!("dangerous" in out[0]));
 });
 
-test("buildSnapshot: 未达 chrome 阈值的交互元素保留；capture 只留同源/JSON", () => {
+test("buildSnapshot: structure 保留、capture 只留同源/JSON，元素清单不入画像", () => {
   const page = {
     url: "https://a.com/1", depth: 0, requestedAt: "t", title: "", finalUrl: "https://a.com/1",
-    loginWall: false, enqueued: [], structure: null, dangerous: [],
+    loginWall: false, enqueued: [], structure: { lists: [], forms: [{ action: "/x" }], passwordFields: 1 },
     outline: [{ sig: "BUTTON", text: "搜索", interactive: true }],
     clickables: [],
     capture: {
@@ -201,24 +133,25 @@ test("buildSnapshot: 未达 chrome 阈值的交互元素保留；capture 只留�
       ],
     },
   };
-  const snap = buildSnapshot([page], { origin: "https://a.com", minPages: 3 });
-  assert.deepEqual(snap.pages[0].outline.map((i) => i.text), ["搜索"]);
-  assert.deepEqual(snap.chrome.outline, []);
-  assert.deepEqual(snap.pages[0].capture.requests.map((r) => r.url), [
+  const out = buildSnapshot([page]);
+  assert.ok(!("outline" in out[0]));
+  assert.ok(!("clickables" in out[0]));
+  assert.deepEqual(out[0].structure.forms, [{ action: "/x" }], "structure 保留供登录墙探测/digest");
+  assert.deepEqual(out[0].capture.requests.map((r) => r.url), [
     "https://a.com/api/list",
     "https://cdn.example.com/data.json", // JSON 的跨源响应保留
   ]);
 });
 
-test("pruneStructure: SVG/渐变图元噪音剔除、列表截断", () => {
+test("pruneStructure: SVG/渐变图元噪音剔除、列表截断、哈希签名只留计数+样例", () => {
   const lists = [
-    { parent: "svg", child: "path", count: 3 },
-    { parent: "g", child: "path", count: 12 },
-    { parent: "linearGradient", child: "stop", count: 8 },
-    { parent: "UL.list", child: "LI.item", count: 20 },
+    { parent: "svg", child: "path", count: 3, sample: "" },
+    { parent: "g", child: "path", count: 12, sample: "" },
+    { parent: "linearGradient", child: "stop", count: 8, sample: "" },
+    { parent: "UL.list", child: "LI.item", count: 20, sample: "阿里巴巴集团" },
   ];
   const out = pruneStructure({ lists, forms: [], passwordFields: 0 });
-  assert.deepEqual(out.lists, [{ parent: "UL.list", child: "LI.item", count: 20 }]);
+  assert.deepEqual(out.lists, [{ count: 20, sample: "阿里巴巴集团" }]);
   assert.deepEqual(pruneStructure({ lists }, { maxLists: 0 }).lists, []);
 });
 

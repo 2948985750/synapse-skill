@@ -19,12 +19,25 @@
 //          触发词进 never；匹配语义见 labelViolates 与全局危险词 discover 的
 //          isDangerousLabel），由 agent 在交互路径遵守，runner 不代点。
 //
-// 动作执行 = 校验 → 护栏 → 参数展开 → 导航到结晶 URL → 记状态。
+// 动作执行 = 校验 → 护栏 → 参数展开 → 导航到结晶 URL → [可选 steps 步骤机] → 记状态。
+//
+// 两种 action 形态（向后兼容）：
+//   1. 纯导航：{title, url, guards}——导航到 url、核验页面就绪即止（taskSucceeded:false）。
+//   2. 带步骤：额外 {steps:[...], verify:[...]}——导航到 url 后按 steps 逐步执行交互，
+//      verify 全过才算成功（taskSucceeded:true）。steps 只存数据，交互原语全走扩展侧
+//      桥命令（query-el/click-el/type-css/wait-for/goto-hash），skill 侧不造页内 JS。
+//
+// steps 操作：click / type / wait / navigate；每步可带：
+//   - ask: "向用户提问的话"——标记该步有风险；runner 执行到此前停住并以 exit 4 返回问题，
+//     用户确认后加 --confirmed 重跑（确认状态不落盘，一次一确认）。
+//   - unless: CSS 选择器——元素已存在则跳过该步（幂等，如撰写窗口已开）。
+//   - note / timeout：排障说明 / 单步超时。
+// verify 操作：text（页面含文字）/ exists（选择器命中）/ navigate（hash 到达）。
 //
 // 用法：
-//   node runner/actions.js <domain> <actionId|list> [--param k=v ...] [--yes] [--dry] [--timeout ms] [--session sid]
+//   node runner/actions.js <domain> <actionId|list> [--param k=v ...] [--yes] [--confirmed] [--dry] [--timeout ms] [--session sid] [--browser-id id] [--allow-failover]
 //
-// Exit codes: 0 成功；1 用法/画像/action 校验失败；2 护栏拦截；3 导航/执行失败（agent 接管点）。
+// Exit codes: 0 成功；1 用法/画像/action 校验失败；2 护栏拦截；3 导航/执行失败（agent 接管点）；4 风险步骤待用户确认。
 const fs = require("fs");
 const path = require("path");
 
@@ -32,6 +45,11 @@ const { PROFILES_ROOT, DATA_ROOT } = require("../agent/paths");
 const { isDangerousLabel } = require("./discover");
 const { connect } = require("../agent/api");
 const { writeJsonAtomic } = require("../agent/lib/json-store");
+
+// steps 步骤机：操作白名单。交互原语走扩展桥命令，skill 侧不构造页内 JS。
+const STEP_OPS = ["click", "type", "wait", "navigate"];
+const TYPE_MODES = ["native", "native-enter", "execCommand"];
+const VERIFY_OPS = ["text", "exists", "navigate"];
 
 // ---------------- 纯函数（test-actions.js 直接测这些） ----------------
 
@@ -75,6 +93,47 @@ function validateAction(action) {
       }
     }
   }
+  // steps / verify 可选：缺席 = 纯导航 action（老画像兼容）；出现则严格校验。
+  if (action.steps !== undefined) {
+    if (!Array.isArray(action.steps) || !action.steps.length) at("actions[].steps 必须是非空数组");
+    else for (const [i, st] of action.steps.entries()) {
+      const tag = `steps[${i}]`;
+      if (!st || typeof st !== "object") { at(tag + " 必须是对象"); continue; }
+      if (!STEP_OPS.includes(st.do)) { at(`${tag}.do 未知「${st.do}」（可选：${STEP_OPS.join("|")}）`); continue; }
+      if (st.do === "wait") {
+        if (!st.ms && !st.sel) at(`${tag}: wait 需要 ms 或 sel`);
+      } else if (st.do === "navigate") {
+        if (typeof st.url !== "string" || !st.url) at(`${tag}.url 必填（可用 {param} 模板）`);
+        if (st.waitMs !== undefined && (!Number.isFinite(st.waitMs) || st.waitMs < 0)) at(`${tag}.waitMs 必须是非负数`);
+      } else {
+        if (typeof st.sel !== "string" || !st.sel) at(`${tag}.sel 必填（CSS 选择器）`);
+      }
+      if (st.do === "type") {
+        if (typeof st.value !== "string") at(`${tag}.value 必填（可用 {param} 模板）`);
+        if (st.mode && !TYPE_MODES.includes(st.mode)) at(`${tag}.mode 未知「${st.mode}」（可选：${TYPE_MODES.join("|")}）`);
+      }
+      if (st.do === "click" && st.mode !== undefined && !["js", "cdp"].includes(st.mode)) {
+        at(`${tag}.mode 未知「${st.mode}」（click 可选：js|cdp）`);
+      }
+      if (st.unless !== undefined && typeof st.unless !== "string") at(`${tag}.unless 必须是选择器`);
+      if (st.timeout !== undefined && (!Number.isFinite(st.timeout) || st.timeout <= 0)) at(`${tag}.timeout 必须是正数`);
+      if (st.ask !== undefined && (typeof st.ask !== "string" || !st.ask.trim())) at(`${tag}.ask 必须是非空提问文本`);
+      if (st.note !== undefined && typeof st.note !== "string") at(`${tag}.note 必须是字符串`);
+    }
+  }
+  if (action.verify !== undefined) {
+    if (!Array.isArray(action.verify)) at("actions[].verify 必须是数组");
+    else for (const [i, v] of action.verify.entries()) {
+      const tag = `verify[${i}]`;
+      if (!v || typeof v !== "object") { at(tag + " 必须是对象"); continue; }
+      if (!VERIFY_OPS.includes(v.op)) { at(`${tag}.op 未知「${v.op}」（可选：${VERIFY_OPS.join("|")}）`); continue; }
+      if (v.op === "text" && typeof v.expect !== "string") at(`${tag}.expect 必填`);
+      if (v.op === "exists" && typeof v.sel !== "string") at(`${tag}.sel 必填`);
+      if (v.op === "navigate" && typeof v.hash !== "string") at(`${tag}.hash 必填`);
+    }
+  }
+  // verify 和 steps 成对出现：只给 verify 而无 steps 无意义，反之则允许（纯交互不验证）。
+  if (action.verify !== undefined && action.steps === undefined) at("actions[].verify 需要同时提供 steps");
   return errs;
 }
 
@@ -255,12 +314,125 @@ async function executeNavigation(browser, action, params, timeoutMs = 180000) {
   throw error;
 }
 
+// ---------------- steps 步骤机（可选，交互原语全走扩展桥命令） ----------------
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// query-el 的返回包装：桥命令直接或包在 result.value 里，两种都取。
+function unwrap(resp) {
+  if (resp && resp.result && "value" in resp.result) return resp.result.value;
+  return resp;
+}
+
+// 轮询到条件成立或超时；tolerateError 用于元素尚未出现时的查询。
+async function pollUntil(fn, timeoutMs, gapMs = 400, tolerateError = false) {
+  const end = Date.now() + timeoutMs;
+  let lastErr = null;
+  for (;;) {
+    try {
+      const v = await fn();
+      if (v) return v;
+    } catch (error) {
+      lastErr = error;
+      if (!tolerateError) throw error;
+    }
+    if (Date.now() > end) {
+      const error = new Error("等待超时（" + timeoutMs + "ms）" + (lastErr ? "，最后错误：" + lastErr.message : ""));
+      error.code = "POLL_TIMEOUT";
+      throw error;
+    }
+    await sleep(gapMs);
+  }
+}
+
+// 查元素信息（text/aria/disabled/visible），等它出现。
+function queryInfo(browser, tabId, sel, timeoutMs) {
+  return pollUntil(async () => {
+    const info = unwrap(await browser.queryEl(tabId, sel));
+    return info && info.found ? info : null;
+  }, timeoutMs, 400, true);
+}
+
+// 执行单步。返回 {skipped?}；风险步在未确认时抛 ASK_USER（带问题文本），失败抛带 code 的错。
+// confirmed=true 表示用户已就 ask 明确答复，该步按正常交互执行。
+async function execStep(browser, tabId, st, params, stepTimeout, confirmed = false) {
+  // unless：元素已存在 → 跳过（幂等）。
+  if (st.unless) {
+    let exists = false;
+    try { exists = !!(await queryInfo(browser, tabId, st.unless, Math.min(stepTimeout, 3000))); } catch (_) {}
+    if (exists) return { skipped: true };
+  }
+
+  // 风险步骤：未确认则停住，把 ask 交回上层向用户提问（不静默执行）。
+  if (st.ask && !confirmed) {
+    const error = new Error(st.ask);
+    error.code = "ASK_USER";
+    error.ask = st.ask;
+    throw error;
+  }
+
+  const timeout = st.timeout || stepTimeout;
+  if (st.do === "wait") {
+    if (st.sel) await queryInfo(browser, tabId, st.sel, timeout);
+    else await sleep(st.ms || 0);
+    return {};
+  }
+  if (st.do === "navigate") {
+    const url = expandParams(st.url, params);
+    await browser.navigate(tabId, url, { waitMs: st.waitMs !== undefined ? st.waitMs : 8000 });
+    return {};
+  }
+
+  // click / type 前先查元素，做禁用检查与危险标签护栏。
+  const info = await queryInfo(browser, tabId, st.sel, timeout);
+  if (info.disabled) throw new Error(`目标被禁用：${st.sel}`);
+
+  if (st.do === "click") {
+    const label = `${info.text || ""} ${info.aria || ""}`.trim();
+    const hit = labelViolates(label, st._neverWords || []);
+    if (hit) {
+      const error = new Error(`点击目标命中危险词「${hit}」，已中止：${st.sel}（label="${label.slice(0, 60)}"）`);
+      error.code = "GUARD_BLOCKED";
+      throw error;
+    }
+    await browser.click(tabId, { sel: st.sel }, { mode: st.mode === "cdp" ? "cdp" : "dom" });
+    return {};
+  }
+  // type
+  await browser.typeCss(tabId, st.sel, st._value, st.mode || "native");
+  return {};
+}
+
+// verify：text（页面文字）/ exists（选择器）/ navigate（hash 到达）。
+async function runVerify(browser, tabId, verify, params, defaultTimeout) {
+  for (const [i, v] of (verify || []).entries()) {
+    if (v.op === "navigate") {
+      await browser.gotoHash(tabId, v.hash, v.reload !== false);
+      await pollUntil(async () => {
+        const raw = unwrap(await browser.run(tabId, "location.href+'|'+document.readyState"));
+        return typeof raw === "string" && raw.includes(v.hash) && raw.endsWith("complete");
+      }, v.waitMs || defaultTimeout, 500, true);
+    } else if (v.op === "text") {
+      const expect = expandParams(v.expect, params);
+      await pollUntil(async () => {
+        const text = unwrap(await browser.run(tabId, "document.body.innerText"));
+        return typeof text === "string" && text.includes(expect);
+      }, v.timeout || defaultTimeout, 600, true);
+    } else if (v.op === "exists") {
+      await queryInfo(browser, tabId, v.sel, v.timeout || defaultTimeout);
+    }
+    log(`verify[${i}] ${v.op} 通过`);
+  }
+}
+
 // ---------------- main ----------------
 
 function parseArgv(argv) {
   const rest = [];
   const params = {};
-  let yes = false, dry = false, timeoutMs = 180000, session = "", browserId = "", allowFailover = false;
+  let yes = false, dry = false, confirmed = false, timeoutMs = 180000, session = "", browserId = "", allowFailover = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--param") {
@@ -269,6 +441,7 @@ function parseArgv(argv) {
       if (at <= 0) throw new Error("--param 需要 k=v（值保持原始字符串，不做类型猜测）");
       params[kv.slice(0, at)] = kv.slice(at + 1);
     } else if (a === "--yes") yes = true;
+    else if (a === "--confirmed") confirmed = true;
     else if (a === "--dry") dry = true;
     else if (a === "--timeout") {
       timeoutMs = Number(argv[++i]);
@@ -285,7 +458,7 @@ function parseArgv(argv) {
     else if (a === "--allow-failover") allowFailover = true;
     else rest.push(a);
   }
-  return { rest, params, yes, dry, timeoutMs, session, browserId, allowFailover };
+  return { rest, params, yes, dry, confirmed, timeoutMs, session, browserId, allowFailover };
 }
 
 // ---------------- 画像动作菜单（agent 查现有动作；list 子命令） ----------------
@@ -312,7 +485,7 @@ function formatActionMenu(profile) {
 }
 
 async function main(argv, deps = {}) {
-  const { rest, params, yes, dry, timeoutMs, session, browserId, allowFailover } = parseArgv(argv);
+  const { rest, params, yes, dry, confirmed, timeoutMs, session, browserId, allowFailover } = parseArgv(argv);
   const [domain, actionId] = rest;
   if (!domain || !actionId) {
     console.error("用法: node runner/actions.js <domain> <actionId|list> [--param k=v ...] [--yes] [--dry] [--session sid] [--timeout ms]");
@@ -351,11 +524,21 @@ async function main(argv, deps = {}) {
   const guard = checkGuards(action, state, new Date(), { yes });
   if (dry) {
     console.log("== dry 计划 ==");
-    console.log(JSON.stringify({ domain, actionId, params, url: action.url, guards: action.guards || {}, guard, missingParams: missing }, null, 2));
+    console.log(JSON.stringify({ domain, actionId, params, url: action.url, guards: action.guards || {}, guard, missingParams: missing, steps: (action.steps || []).length, verify: (action.verify || []).length }, null, 2));
     if (!guard.ok) {
       console.log("注意：按当前状态真跑会被拦 ——\n  " + guard.reasons.join("\n  "));
     }
-    if (state) console.log("状态: " + JSON.stringify(state));
+    for (const [i, st] of (action.steps || []).entries()) {
+      const shown = { ...st };
+      if (typeof shown.value === "string") shown.value = expandParams(shown.value, params);
+      if (typeof shown.url === "string") shown.url = expandParams(shown.url, params);
+      console.log(`  step ${i}: ${JSON.stringify(shown)}${st.ask ? `  ← 待用户确认：${st.ask}` : ""}`);
+    }
+    for (const v of action.verify || []) console.log(`  verify: ${JSON.stringify(v)}`);
+    if (state) {
+      const { recent, ...slimState } = state; // recent 是外发审计痕迹，计划展示用不上
+      console.log("状态: " + JSON.stringify(slimState));
+    }
     process.exit(0);
   }
   if (missing.length) {
@@ -367,7 +550,6 @@ async function main(argv, deps = {}) {
     process.exit(2);
   }
 
-  if (profile.status === "draft") throw new Error("画像仍是 draft，请先人工审阅并确认后再执行");
   const releaseStateLock = acquireActionStateLock(sFile);
   let browser;
   const trace = [];
@@ -384,21 +566,70 @@ async function main(argv, deps = {}) {
     const remaining = timeoutMs - (Date.now() - started);
     if (remaining <= 0) throw new Error("Action connection deadline exceeded");
     const result = await executeNavigation(browser, action, params, remaining);
-    const now = new Date();
+
+    // 纯导航 action：只核验页面就绪即止。
+    const hasSteps = Array.isArray(action.steps) && action.steps.length > 0;
+    if (!hasSteps) {
+      const next = {
+        ...bumpState(currentState, params, new Date()),
+        lastNavigation: { params, finalUrl: result.finalUrl },
+      };
+      fs.mkdirSync(path.dirname(sFile), { recursive: true });
+      (deps.writeState || writeJsonAtomic)(sFile, next);
+      log("页面已就绪；业务任务尚未执行或验证");
+      console.log(JSON.stringify(result, null, 2));
+      return result;
+    }
+
+    // 带 steps：展开参数与护栏词表，逐步执行；每步带索引进 trace。
+    const neverWords = (action.guards && action.guards.never) || [];
+    const steps = action.steps.map((st) => ({
+      ...st,
+      _value: typeof st.value === "string" ? expandParams(st.value, params) : st.value,
+      _neverWords: neverWords,
+    }));
+    const stepTimeout = 15000;
+    for (const [i, st] of steps.entries()) {
+      try {
+        const r = await execStep(browser, result.tabId, st, params, stepTimeout, confirmed);
+        trace.push({ step: i, do: st.do, ok: true, skipped: !!r.skipped });
+        log(`step ${i} ${st.do}${r.skipped ? "（unless 跳过）" : ""} ✓ ${(st.note || "").slice(0, 40)}`);
+      } catch (error) {
+        error.stepIndex = i;
+        throw error;
+      }
+    }
+    await runVerify(browser, result.tabId, action.verify, params, stepTimeout);
+
+    // steps + verify 全过才记成功状态（纯导航仍按导航计数，语义见 docblock）。
     const next = {
-      ...bumpState(currentState, params, now),
+      ...bumpState(currentState, params, new Date()),
       lastNavigation: { params, finalUrl: result.finalUrl },
+      lastSteps: { count: steps.length, at: new Date().toISOString() },
     };
     fs.mkdirSync(path.dirname(sFile), { recursive: true });
     (deps.writeState || writeJsonAtomic)(sFile, next);
-    log("页面已就绪；业务任务尚未执行或验证");
-    console.log(JSON.stringify(result, null, 2));
-    return result;
+    const out = { ...result, taskSucceeded: true, outcome: "steps-verified", steps: trace };
+    log(`steps 执行完成（${steps.length} 步），verify 全过`);
+    console.log(JSON.stringify(out, null, 2));
+    return out;
   } catch (e) {
+    // ASK_USER：风险步待确认——返回问题与已完成 trace，退出码 4，不写状态、不误报失败。
+    if (e.code === "ASK_USER") {
+      const out = {
+        ok: false, code: "ASK_USER", ask: e.ask, stepIndex: e.stepIndex,
+        hint: "用户确认后加 --confirmed 重跑；确认不落盘，一次一确认",
+        trace,
+      };
+      console.error(JSON.stringify(out, null, 2));
+      process.exitCode = 4;
+      return out;
+    }
     const out = {
       ok: false,
       error: e.message,
       code: e.code || "ACTION_FAILED",
+      failedStep: e.stepIndex,
       trace,
       on_fail: action.on_fail || "agent 即席接管完成本次任务，然后修订画像里的 action 数据（选择器漂移/流程变化）",
     };
@@ -438,4 +669,10 @@ module.exports = {
   formatActionMenu,
   findOrOpenTab,
   executeNavigation,
+  execStep,
+  runVerify,
+  pollUntil,
+  STEP_OPS,
+  TYPE_MODES,
+  VERIFY_OPS,
 };

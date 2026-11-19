@@ -3,15 +3,17 @@
 // Profile discovery: the collection program for site profiles.
 //
 // 设计立场：采集是通用动作——本程序对所有站点都是同一套代码（打开/复用页面 →
-// 等渲染 → outline/clickables 探针 → 结构探针 → XHR capture）。画像就是采集产物
-// 本身：快照（snapshot 段）+ 站点知识，纯数据、无采集代码。没有独立的"材料包"，
-// 元素快照与响应体都直接写进画像。
+// 等渲染 → 结构探针 → XHR capture）。画像就是采集产物
+// 本身：页面证据（顶层 pages 段）+ 站点知识，纯数据、无采集代码。没有独立的"材料包"，
+// 结构证据与响应体都直接写进画像。元素交互不在采集期冻结成快照——agent 用
+// collect-elements/run 实时探活 DOM，跑通的操作当场结晶成 steps。
 //
-//   run —— open the entry page ONCE and take a single-page rich snapshot:
-//          all interactive elements (incl. SPA jump containers: cursor:pointer /
-//          onclick / role=link divs, not just <a href>) + structure probe + XHR
-//          capture (bodies included), then write ONE profile at
-//          <PROFILES_ROOT>/<domain>.json with the snapshot embedded.
+//   run —— open the entry page ONCE and take a single-page structural snapshot:
+//          structure probe (lists/forms/password fields) + XHR capture (bodies
+//          included), then write ONE profile at <PROFILES_ROOT>/<domain>.json
+//          with the pages embedded. No frozen element list: the agent discovers
+//          interactive elements live at collection time and crystallizes the
+//          operations it actually runs into steps[].
 //          The program does NOT auto-follow links to crawl further pages —
 //          page-to-page jumps / routes are discovered by the LLM during
 //          interactive exploration (click → observe location change → summarize),
@@ -67,8 +69,9 @@ function ensureProfilesSeeded() {
 
 // ---------------- pure helpers（test-discover.js 直接测这些） ----------------
 
-// 危险动作词表：宁可误拦（记录为 skipped/dangerous，agent 可见可复核），
-// 不可漏拦。CJK 用 includes，ASCII 用词边界，避免 "remove" 命中 "remover"。
+// 危险动作词表：宁可误拦，不可漏拦。供 actions.js 的 labelViolates 在交互时
+// 判断点击目标是否危险（步骤级风险提示）；CJK 用 includes，ASCII 用词边界，
+// 避免 "remove" 命中 "remover"。
 const DANGER_CJK = [
   "删除",
   "注销",
@@ -140,19 +143,14 @@ function clusterByPathPrefix(urls, segs = 1) {
 }
 
 // 紧凑目录段（纯数据）：画像的"各段规模"。LLM 读画像的第一步只看这段
-// （~10 行）就知道盘子多大，再按需开 snapshot/capture。只承载规模，不承载
-// 业务信号（接口家底/危险词等仍由 LLM 进 snapshot 段自己看）。
-function buildDigest(snapshot) {
-  const pages = (snapshot && snapshot.pages) || [];
-  let interactive = 0;
-  let clickables = 0;
+// 规模目录（token 经济）：digest 只承载各段规模，LLM 读画像先读它定盘子（~10 行），
+// 再按需开 pages[]。入参是画像顶层 pages 数组。
+function buildDigest(pages) {
   let forms = 0;
   let lists = 0;
   let bodiesReturned = 0;
   let bodyBytes = 0;
-  for (const p of pages) {
-    interactive += (p.outline || []).length;
-    clickables += (p.clickables || []).length;
+  for (const p of pages || []) {
     const st = p.structure || {};
     forms += (st.forms || []).length;
     lists += (st.lists || []).length;
@@ -163,28 +161,21 @@ function buildDigest(snapshot) {
   }
   return {
     pages: pages.length,
-    interactive,
-    clickables,
     forms,
     lists,
     responseBodies: { returned: bodiesReturned, bytesKb: Math.round(bodyBytes / 1024) },
-    snapshotKb: Math.round(JSON.stringify(snapshot || {}).length / 1024),
+    snapshotKb: Math.round(JSON.stringify(pages || []).length / 1024),
   };
 }
 
-function buildProfileSkeleton({ domain, entry, visited, observations, snapshot }) {
+function buildProfileSkeleton({ domain, entry, visited, observations, pages }) {
   const today = new Date().toISOString().slice(0, 10);
   return {
-    schemaVersion: 3,
     domain,
-    status: "draft",
-    // 目录段（token 经济）：只承载各段规模（pages/interactive/clickables/forms/
-    // lists/responseBodies/snapshotKb），LLM 读画像的第一步先看它定盘子（~10 行），
-    // 再按需开 snapshot/capture。不承载业务信号（接口家底/危险词等由 LLM 进
-    // snapshot 段自己看）。
-    digest: buildDigest(snapshot),
+    // 目录段（token 经济）：只承载各段规模（pages/forms/lists/responseBodies/snapshotKb），
+    // LLM 读画像的第一步先看它定盘子（~10 行），再按需开 pages[]。不承载业务信号（接口家底/危险词等由 LLM 进 pages 段自己看）。
+    digest: buildDigest(pages),
     createdAt: today,
-    updatedAt: today,
     access: {
       login: {
         required: observations.loginRequired,
@@ -194,14 +185,12 @@ function buildProfileSkeleton({ domain, entry, visited, observations, snapshot }
     },
     limits: observations.limits || {},
     antiScrape: [],
-    fieldMap: {},
     pageNotes: [],
     actions: [],
     pending: [],
-    goal: "站点画像采集完成",
-    // 采集快照：仅可交互元素（sig/text/interactive）与可点容器；跨页重复的
-    // 站点框架归并在 chrome 一份。画像本身就是采集产物，无独立材料包。
-    snapshot,
+    // 采集到的页面：扁平挂在画像顶层，无 snapshot 包装层、无 chrome 归并。
+    // 画像本身就是采集产物，无独立材料包。
+    pages,
   };
 }
 
@@ -226,120 +215,6 @@ const STRUCTURE_PROBE_JS =
 const SCROLL_TRIGGER_JS =
   "(function(){try{window.scrollTo(0,document.body.scrollHeight)}catch(e){};return 'ok'})()";
 
-// 页面文本骨架：只遍历文本节点映射到持有元素，纯布局包装层不持有文本节点，
-// 在数据源头就消失（不走"全元素取 innerText"——那是 layout-dependent API，会强制 reflow）。
-// 表单控件没有文本节点，不在此表里——它们由 snapshot 的可交互启发式覆盖，两表互补。
-// img 永远没有 innerText，用 alt 兜底成伪条目。
-// clickables 是同一枚硬币的另一面：包装层自己成了可点击卡片（cursor:pointer /
-// tabindex / onclick，现代站点最常见且 snapshot 选择器不认的功能入口）——纯布局
-// 包装必须排除，兼任按钮的包装必须以容器为单位捞回来，不炸成内部文本叶子。
-const OUTLINE_PROBE_JS =
-  "(function(){try{" +
-  "if(!document.body)return{outline:[],clickables:[]}" +
-  ";var ITAG={A:1,BUTTON:1,INPUT:1,SELECT:1,TEXTAREA:1,SUMMARY:1,OPTION:1,LABEL:1};" +
-  "var IROLE={button:1,tab:1,menuitem:1,menuitemradio:1,menuitemcheckbox:1,checkbox:1,radio:1,switch:1,link:1,option:1,combobox:1,listbox:1,slider:1,spinbutton:1,textbox:1,searchbox:1};" +
-  "var sig=function(e){var c=(typeof e.className==='string')?e.className.trim().replace(/\\s+/g,'.').slice(0,40):'';return e.tagName+(e.id?'#'+e.id:'')+(c?'.'+c:'')};" +
-  "var owners=new Map(),SKIP={SCRIPT:1,STYLE:1,NOSCRIPT:1,SVG:1,CANVAS:1};" +
-  "var w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null);" +
-  "while(w.nextNode()){var n=w.currentNode,v=n.nodeValue;if(!v||!v.trim())continue;" +
-  "var p=n.parentElement;if(!p||SKIP[p.tagName])continue;" +
-  "var a=owners.get(p);if(a)a.push(v);else owners.set(p,[v])}" +
-  "var items=[],cur=300;" +
-  "owners.forEach(function(vs,el){" +
-  "var text=vs.join(' ').replace(/\\s+/g,' ').trim();if(!text)return;" +
-  "var tag=el.tagName,role=el.getAttribute('role')||'';" +
-  "var it={sig:sig(el),tag:tag,role:role,text:text.slice(0,80)," +
-  "interactive:!!(ITAG[tag]||(role&&IROLE[role])||el.hasAttribute('tabindex')||el.hasAttribute('onclick')||el.isContentEditable)};" +
-  "if(tag==='A'&&el.href)it.href=String(el.href);" +
-  "if(!it.interactive&&cur>0){cur--;try{it.cursorPointer=getComputedStyle(el).cursor==='pointer'}catch(e){}}" +
-  "items.push(it)});" +
-  "[].forEach.call(document.querySelectorAll('img[alt]'),function(im){" +
-  "var alt=(im.getAttribute('alt')||'').trim();if(!alt)return;" +
-  "items.push({sig:sig(im),tag:'IMG',role:'',text:'[img] '+alt.slice(0,60),interactive:false})});" +
-  "var std=function(e){return ITAG[e.tagName]||IROLE[e.getAttribute('role')||'']};" +
-  "var clicks=[],emitted=[],all=document.querySelectorAll('body *'),cap=Math.min(all.length,4000);" +
-  "for(var i=0;i<cap;i++){var el=all[i];if(std(el))continue;" +
-  "var r=el.getBoundingClientRect();if(r.width<2||r.height<2)continue;" +
-  "var c='';try{c=getComputedStyle(el).cursor}catch(_){}" +
-  "if(c!=='pointer'&&!el.hasAttribute('tabindex')&&!el.hasAttribute('onclick'))continue;" +
-  "var txt=(el.innerText||'').replace(/\\s+/g,' ').trim();if(!txt)continue;" +
-  "var covered=false;for(var j=0;j<emitted.length;j++){if(emitted[j].contains(el)){covered=true;break}}" +
-  "if(covered)continue;emitted.push(el);" +
-  "var la=el.matches('a[href]')?el:el.querySelector('a[href]');" +
-  "var it2={sig:sig(el),text:txt.slice(0,80)};" +
-  "if(la&&la.href)it2.href=String(la.href);" +
-  "clicks.push(it2);" +
-  "if(clicks.length>=30)break}" +
-  "return {outline:items,clickables:clicks}" +
-  "}catch(e){return{outline:[{sig:'PROBE',tag:'ERROR',role:'',text:String(e).slice(0,80),interactive:false}],clickables:[]}}})()";
-
-// 骨架的 node 侧整形：同签名+同文本的合并计次（导航项"首页"×3 是一个信息不是三条）、
-// 截断限量。规则放 node 侧是为了可单测；页内探针只负责采集。
-// 双上限（token 经济）：可交互条目信息密度高，放宽到 200；非交互的纯文本骨架
-// 是给 LLM 的"页面大意"，60 条足够——token 大头在后者。
-function shapeOutline(items, { max = 200, maxText = 60 } = {}) {
-  const seen = new Map();
-  const out = [];
-  let interactiveOut = 0;
-  let textOut = 0;
-  for (const it of Array.isArray(items) ? items : []) {
-    if (!it || typeof it !== "object") continue;
-    const text = String(it.text || "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 80);
-    if (!text) continue;
-    const key = String(it.sig || it.tag || "?") + "|" + text;
-    const prev = seen.get(key);
-    if (prev) {
-      prev.count = (prev.count || 1) + 1;
-      continue;
-    }
-    const item = {
-      sig: String(it.sig || it.tag || "?").slice(0, 80),
-      text,
-      interactive: !!it.interactive,
-    };
-    if (it.role) item.role = String(it.role).slice(0, 30);
-    if (it.href) item.href = String(it.href);
-    if (it.cursorPointer) item.cursorPointer = true;
-    // 双上限在"首次出现"时记账（计次合并不再占用额度）
-    if (item.interactive) {
-      if (interactiveOut >= max) continue;
-      interactiveOut++;
-    } else {
-      if (textOut >= maxText) continue;
-      textOut++;
-    }
-    seen.set(key, item);
-    out.push(item);
-  }
-  return out;
-}
-
-// 可点容器的 node 侧整形：同签名+同文本去重（点卡片常整排同构）、截断限量。
-function shapeClickables(items, { max = 30 } = {}) {
-  const seen = new Set();
-  const out = [];
-  for (const it of Array.isArray(items) ? items : []) {
-    if (!it || typeof it !== "object") continue;
-    const text = String(it.text || "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 80);
-    if (!text) continue;
-    const sig = String(it.sig || "?").slice(0, 80);
-    const key = sig + "|" + text;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const item = { sig, text };
-    if (it.href) item.href = String(it.href);
-    out.push(item);
-    if (out.length >= max) break;
-  }
-  return out;
-}
-
 // ---------------- 快照整形（采集结果入画像前的筛选） ----------------
 
 // SVG/渐变等图元不是列表结构，纯噪音。
@@ -355,7 +230,10 @@ function pruneStructure(structure, { maxLists = 8 } = {}) {
         !STRUCT_NOISE_RE.test(tagOf(l && l.parent)) &&
         !STRUCT_NOISE_RE.test(tagOf(l && l.child)),
     )
-    .slice(0, maxLists);
+    .slice(0, maxLists)
+    // token 经济：parent/child 是带哈希后缀的 class 签名（站点改版即变、无法用于定位），
+    // 只留计数+文本样例——判站/统计够用，LLM 读取不再吃哈希噪声。
+    .map((l) => ({ count: l.count, sample: l.sample }));
   return { ...structure, lists };
 }
 
@@ -442,58 +320,11 @@ function pruneCapture(capture, { bodyBudgetKb = 256 } = {}) {
   return { ...capture, requests, bytesKb: Math.round((used / 1024) * 10) / 10 };
 }
 
-// 采集结果 → 画像 snapshot：outline 只留可交互元素（interactive:true），
-// clickables 保留；同一 sig+text 在多数页面（默认 >= 半数）重复出现 = 站点框架
-// （导航/侧栏/页脚），归并进 chrome 只存一份。links/controls 是采集中间量，不入画像。
-function buildSnapshot(
-  pages,
-  { skipped = [], minPages, maxOutline = 200 } = {},
-) {
-  // 阈值按页面数自适应：至少 3 页、且覆盖半数页面。低于半数的重复元素很可能是
-  // 页面级操作（如详情页的 Apply now、同族页共享的 tab），归并会把页面交互面搬空。
-  const chromeMin = Math.max(3, Math.ceil((pages.length || 1) / 2));
-  // "跨多页重复 = 站点框架"的判定对单页采集不成立：同页三条同卡片是内容不是
-  // 框架，归并会把页面交互面搬空。
-  const threshold = Number.isFinite(minPages)
-    ? minPages
-    : (pages.length || 0) >= 2
-      ? chromeMin
-      : Infinity;
-  const counts = new Map();
-  const keyOf = (sig, text) => String(sig || "?") + "|" + String(text || "");
-  const bump = (kind, it) => {
-    const k = keyOf(it.sig, it.text);
-    const prev =
-      counts.get(k) ||
-      {
-        kind,
-        sig: String(it.sig || "?"),
-        text: String(it.text || ""),
-        href: it.href ? String(it.href) : "",
-        pages: 0,
-      };
-    prev.pages++;
-    counts.set(k, prev);
-  };
-  for (const pg of pages) {
-    for (const it of pg.outline || []) if (it.interactive) bump("outline", it);
-    for (const c of pg.clickables || []) bump("clickables", c);
-  }
-  const isChrome = (it) => {
-    const c = counts.get(keyOf(it.sig, it.text));
-    return !!c && c.pages >= threshold;
-  };
-  const chromeOutline = [];
-  const chromeClickables = [];
-  for (const v of counts.values()) {
-    if (v.pages < threshold) continue;
-    (v.kind === "outline" ? chromeOutline : chromeClickables).push({
-      sig: v.sig,
-      text: v.text,
-      pages: v.pages,
-      ...(v.href ? { href: v.href } : {}),
-    });
-  }
+// 采集结果 → 画像 pages：扁平结构，pages 直接挂画像顶层，无 snapshot 包装层。
+// 元素清单（outline/clickables）已移除——agent 采集时用 collect-elements/run 实时探活 DOM，
+// steps 直接结晶跑通的操作序列，不再存采集瞬间的元素快照。保留 structure（表单/列表/密码框）
+// 供登录墙探测与 digest 规模统计，capture 按需抓。
+function buildSnapshot(pages) {
   const pruned = pages.map((pg) => ({
     url: pg.url,
     requestedAt: pg.requestedAt,
@@ -501,17 +332,9 @@ function buildSnapshot(
     finalUrl: pg.finalUrl,
     loginWall: pg.loginWall,
     structure: pruneStructure(pg.structure),
-    dangerous: pg.dangerous,
-    outline: (pg.outline || []).filter((it) => it.interactive && !isChrome(it)).slice(0, maxOutline),
-    clickables: (pg.clickables || []).filter((c) => !isChrome(c)),
     capture: pruneCapture(pg.capture),
   }));
-  return {
-    capturedAt: new Date().toISOString(),
-    chrome: { outline: chromeOutline, clickables: chromeClickables },
-    pages: pruned,
-    skipped,
-  };
+  return pruned;
 }
 
 // ---------------- run ----------------
@@ -568,7 +391,7 @@ async function discoverRun(argv, deps = {}) {
   const doCapture = argv.includes("--capture");
 
   // 位置完全由程序决定：没有位置旗标，agent 无权指定保存位置。
-  // 采集结果直接写进画像（快照在 snapshot 段）——不存在独立的"材料包"。
+  // 采集结果直接写进画像（页面证据在 pages 段）——不存在独立的"材料包"。
   const profilePath = path.join(PROFILES_ROOT, domain + ".json");
 
   if (fs.existsSync(profilePath) && !force) {
@@ -594,9 +417,8 @@ async function discoverRun(argv, deps = {}) {
   const skipped = [];
 
   try {
-    // 单页富快照：程序只打开入口页，采集全部可交互元素（含 SPA 跳转容器）+ 响应体。
-    // 不再跟 <a> 自动翻页——每个元素"点了跳到哪页/发生什么行为"由 LLM 交互时观测
-    // 并总结（agent 用 click-el 触发、观察 location 变化、记进画像知识）。
+    // 单页结构快照：程序只打开入口页，采结构探针 + 响应体。元素交互不在采集期
+    // 冻结——agent 用 collect-elements/run 实时探活，跑通的操作当场结晶成 steps。
     const opened = await browser.open(entry, { waitMs: 8000 });
     tabId = opened.tabId;
     await sleep(settleMs);
@@ -608,9 +430,6 @@ async function discoverRun(argv, deps = {}) {
       finalUrl: "",
       loginWall: false,
       structure: null,
-      dangerous: [],
-      outline: [],
-      clickables: [],
       capture: null,
     };
 
@@ -640,69 +459,15 @@ async function discoverRun(argv, deps = {}) {
     } catch (e) {
       log("structure probe failed: " + e.message);
     }
-    try {
-      if (!crossOrigin) {
-        const shaped = await runValue(OUTLINE_PROBE_JS);
-        page.outline = shapeOutline(shaped && shaped.outline);
-        page.clickables = shapeClickables(shaped && shaped.clickables);
-      }
-    } catch (e) {
-      page.outline = [];
-      page.clickables = [];
-      log("outline probe failed: " + e.message);
-    }
     if (!crossOrigin)
       page.loginWall =
         page.loginWall ||
         !!(page.structure && page.structure.passwordFields > 0);
 
-    if (!crossOrigin) {
-      try {
-        const snap = await browser.collectElements(tabId, { max: 60 });
-        // collect-elements 返回 {url,ts,total,count,items}，不是裸数组。
-        const items = Array.isArray(snap) ? snap : (snap && snap.items) || [];
-        for (const el of items) {
-          const label = String(el.label || "");
-          const danger = isDangerousLabel(label);
-          if (danger)
-            page.dangerous.push({
-              where: "snapshot",
-              tag: el.tag,
-              role: el.role || "",
-              label,
-              matched: danger,
-            });
-        }
-      } catch (e) {
-        log("snapshot failed: " + e.message);
-      }
-    }
-
-    // 危险词覆盖整页大纲/SPA 可点容器，不只快照前 60 条。带 where 标明出处；
-    // 不存 snapshot 的 i 编号（它是当次会话的索引空间，画像里没有那张表，
-    // 实跑时编号也会漂移，只靠 tag/role/sig/label 定位）。
-    const seenDanger = new Set();
-    for (const it of [...(page.outline || []), ...(page.clickables || [])]) {
-      const text = String(it.text || "").replace(/\s+/g, " ").slice(0, 60);
-      const danger = isDangerousLabel(text);
-      if (!danger) continue;
-      const key = String(it.sig || "?") + "|" + text;
-      if (seenDanger.has(key)) continue;
-      seenDanger.add(key);
-      const sig = String(it.sig || "");
-      page.dangerous.push({
-        where: "outline",
-        sig,
-        tag: sig.split(/[.#]/)[0],
-        label: text,
-        matched: danger,
-      });
-    }
-
     if (!crossOrigin && doCapture) {
       try {
         const cap = await browser.call("capture", { tabId, action: "wait" });
-        // 响应体随页进画像 snapshot（原独立 captures/ 文件取消）。
+        // 响应体随页进画像 pages（原独立 captures/ 文件取消）。
         page.capture = {
           totalRequestsSeen: cap.totalRequestsSeen,
           returned: cap.returned,
@@ -723,17 +488,16 @@ async function discoverRun(argv, deps = {}) {
         note: "单页富快照；页间跳转/路由由 LLM 交互观测补全（discover 不再自动跟链接）",
       },
     };
-    const snapshot = buildSnapshot([page], { skipped });
+    const pages = buildSnapshot([page]);
     const profile = buildProfileSkeleton({
       domain,
       entry,
       visited: [entry],
       observations,
-      snapshot,
+      pages,
     });
     fs.mkdirSync(path.dirname(profilePath), { recursive: true });
-    // 画像本身是采集产物（纯数据）：采集快照在 snapshot 段，知识字段（fieldMap/
-    // pageNotes/antiScrape）由 agent 依 snapshot 补全；没有任何代码。
+    // 画像本身是采集产物（纯数据）：页面证据在 pages 段，知识字段（pageNotes/antiScrape）由 agent 依 pages 补全；没有任何代码。
     // 原子写（同目录 tmp + rename，与 agent/lib/json-store 同纪律）：半写坏的
     // 文件会让下次"已存在拒绝"卡在损坏文件上。
     const tmpPath = profilePath + "." + process.pid + ".tmp";
@@ -742,11 +506,7 @@ async function discoverRun(argv, deps = {}) {
 
     const bodyCount =
       page.capture && page.capture.requests ? page.capture.requests.length : 0;
-    log(
-      `page: ${page.finalUrl || entry}（可交互 ${
-        page.outline.length + page.clickables.length
-      }，响应体 ${bodyCount}）`,
-    );
+    log(`page: ${page.finalUrl || entry}（响应体 ${bodyCount}）`);
     console.log(
       JSON.stringify({
         ok: true,
@@ -754,12 +514,9 @@ async function discoverRun(argv, deps = {}) {
         entry,
         finalUrl: page.finalUrl || entry,
         loginWall: page.loginWall,
-        snapshot: {
-          interactive: page.outline.length + page.clickables.length,
-          responseBodies: bodyCount,
-        },
+        pages: { responseBodies: bodyCount },
         profile: profilePath,
-        note: "单页富快照（含 SPA 跳转容器）已写入 snapshot 段；页间跳转与路由由 LLM 交互观测补全，知识字段（fieldMap/pageNotes/antiScrape）由 agent 依 snapshot 补全（见 SKILL.md「画像生产」）",
+        note: "单页富快照已写入 pages 段（无元素清单：agent 用 collect-elements/run 实时探活、steps 结晶操作序列）；页间跳转与路由由 LLM 交互观测补全，知识字段（pageNotes/antiScrape）由 agent 依 pages 补全（见 SKILL.md「画像生产」）",
       }),
     );
     return 0;
@@ -799,10 +556,7 @@ module.exports = {
   pruneStructure,
   pruneCapture,
   jsonShapeOf,
-  shapeOutline,
-  shapeClickables,
   // 页内探针源码（审计/复现用：注入浏览器执行）
   STRUCTURE_PROBE_JS,
-  OUTLINE_PROBE_JS,
   main,
 };

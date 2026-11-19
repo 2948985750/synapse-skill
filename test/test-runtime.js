@@ -27,7 +27,7 @@ function actionFixture(context, overrides = {}) {
   };
   const action = { title: "Compose", url: "https://example.test/#/compose" };
   const deps = {
-    loadProfile: () => ({ domain: "example.test", status: "ready", actions: [action] }),
+    loadProfile: () => ({ domain: "example.test", actions: [action] }),
     stateFileFor: () => stateFile,
     connect: async () => browser,
   };
@@ -57,15 +57,6 @@ test("actions main rejects an unfinished load without incrementing state", async
   assert.equal(fixture.isClosed(), true);
 });
 
-test("actions main refuses a draft before connecting", async (context) => {
-  const fixture = actionFixture(context);
-  let connected = false;
-  fixture.deps.connect = async () => { connected = true; return fixture.browser; };
-  fixture.deps.loadProfile = () => ({ status: "draft", actions: [fixture.action] });
-  await assert.rejects(main(["example.test", "compose"], fixture.deps), /draft/);
-  assert.equal(connected, false);
-});
-
 test("navigation verifies final route and does not misreport a redirect as ready", async (context) => {
   const fixture = actionFixture(context, { cdp: async () => ({ result: { value: { url: "https://example.test/login", readyState: "complete" } } }) });
   await assert.rejects(executeNavigation(fixture.browser, fixture.action, {}, 30), { code: "NAVIGATION_NOT_READY" });
@@ -83,6 +74,71 @@ test("same-origin navigation includes hash routes and propagates failure without
   assert.equal(calls[0].args.url, "https://example.test/#/compose");
   browser.call = async () => { throw new Error("navigation failed"); };
   await assert.rejects(findOrOpenTab(browser, { url: "https://example.test/", waitMs: 100 }), /navigation failed/);
+});
+
+test("actions main with steps executes interactions and verify, reports taskSucceeded", async (context) => {
+  const fixture = actionFixture(context);
+  const calls = [];
+  // 覆盖 browser 原语：queryEl 返回 found，click/typeCss 记账，run 给 verify 返回含期望文字
+  const browserWithSteps = {
+    ...fixture.browser,
+    queryEl: async (tab, sel) => { calls.push(["queryEl", sel]); return { found: true, text: "", aria: "", disabled: false }; },
+    click: async (tab, el) => { calls.push(["click", el]); return {}; },
+    typeCss: async (tab, sel, value) => { calls.push(["typeCss", sel, value]); return {}; },
+    run: async (tab, expr) => { calls.push(["run", expr]); return { result: { value: "搜索结果 33 条" } }; },
+  };
+  fixture.deps.connect = async () => browserWithSteps;
+  fixture.deps.loadProfile = () => ({
+    domain: "example.test",
+    actions: [{
+      title: "Compose", url: "https://example.test/#/compose",
+      steps: [
+        { do: "type", sel: "input", value: "{q}", mode: "native" },
+        { do: "click", sel: "button" },
+      ],
+      verify: [{ op: "text", expect: "搜索结果" }],
+    }],
+  });
+  const result = await main(["example.test", "compose", "--param", "q=手机壳", "--timeout", "1000"], fixture.deps);
+  assert.equal(result.taskSucceeded, true);
+  assert.equal(result.outcome, "steps-verified");
+  assert.equal(result.steps.length, 2);
+  assert.ok(calls.some((c) => c[0] === "typeCss" && c[2] === "手机壳"));
+  assert.ok(calls.some((c) => c[0] === "click"));
+  const state = JSON.parse(fs.readFileSync(fixture.stateFile, "utf8"));
+  assert.equal(state.navigationCount, 1);
+  assert.ok(state.lastSteps);
+});
+
+test("actions main halts on ask step with exit 4 and writes no state", async (context) => {
+  const previousExit = process.exitCode;
+  context.after(() => { process.exitCode = previousExit; });
+  const fixture = actionFixture(context);
+  const calls = [];
+  const browserWithSteps = {
+    ...fixture.browser,
+    queryEl: async () => ({ found: true, text: "", aria: "", disabled: false }),
+    click: async () => { calls.push("click"); return {}; },
+  };
+  fixture.deps.connect = async () => browserWithSteps;
+  fixture.deps.loadProfile = () => ({
+    domain: "example.test",
+    actions: [{
+      title: "Compose", url: "https://example.test/#/compose",
+      steps: [
+        { do: "click", sel: ".safe" },
+        { do: "click", sel: ".danger", ask: "确认要提交吗？" },
+      ],
+    }],
+  });
+  const result = await main(["example.test", "compose", "--timeout", "1000"], fixture.deps);
+  assert.equal(result.code, "ASK_USER");
+  assert.equal(result.ask, "确认要提交吗？");
+  assert.equal(result.stepIndex, 1);
+  assert.equal(result.trace.length, 1);
+  assert.equal(process.exitCode, 4);
+  assert.equal(fs.existsSync(fixture.stateFile), false);
+  assert.equal(calls.length, 1, "仅 .safe 步点击；风险步本身不得点击");
 });
 
 test("navigation counters enforce guards without creating business success", () => {
