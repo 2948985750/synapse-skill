@@ -130,6 +130,16 @@ async function runServe(sid, token, opts = {}) {
   process.removeListener("SIGINT", shutdown);
   process.removeListener("SIGTERM", shutdown);
 }
+// token 经济：collect-elements 的 items 清单是 agent 每次采集/即席都吃进上下文的批量输出，
+// 走单行紧凑 JSON（并去掉本地时间戳 ts）；其余命令保持两空格缩进便于人工排障。
+function renderResult(result) {
+  if (result && Array.isArray(result.items)) {
+    const { ts, ...lean } = result;
+    return JSON.stringify(lean);
+  }
+  return JSON.stringify(result, null, 2);
+}
+
 // --keep：临时会话桥 = serve 语义（注册表条目 + 多客户端路由），但不驻留后台：
 // 自身作为第一个客户端执行本次命令，随后 park 到 Ctrl+C。注册表条目让同会话
 // 后续 one-shot（WB_SESSION=<打印的 sid>）直接毫秒级复用，不必再走 60s 直连。
@@ -161,7 +171,7 @@ async function runKeep(command, token, opts) {
       skipGracefulDisconnect: true,
     });
     const result = await executeCommand(channel, command, opts);
-    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    process.stdout.write(renderResult(result) + "\n");
     await new Promise((resolve) => {
       process.once("SIGINT", resolve);
       process.once("SIGTERM", resolve);
@@ -280,7 +290,7 @@ async function main(argv = process.argv.slice(2)) {
       );
     }
     const result = await executeCommand(channel, command, opts);
-    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    process.stdout.write(renderResult(result) + "\n");
   } finally {
     if (channel) await channel.close(false);
   }
