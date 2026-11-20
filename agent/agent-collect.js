@@ -237,6 +237,62 @@ async function main(argv = process.argv.slice(2)) {
     await runStatus(opts);
     return;
   }
+  if (command.cmd === "listeners") {
+    // 元素监听器探测：必须在同一个客户端会话内连发 evaluate + getEventListeners——
+    // objectId 的生命周期绑定调试会话（clientId），跨进程/跨命令即失效（2026-11-20 实测）。
+    // 返回节点自己绑的全部事件类型：addEventListener 与 onxxx=fn 两类都覆盖（Chromium
+    // 把属性式处理器也当节点监听记录）；不含祖先与 React 委托在 root 上的监听器。
+    const { connect } = require("./api");
+    const { tabId, sel } = command.args || {};
+    if (!Number.isInteger(tabId) || !sel) {
+      throw Object.assign(new Error("用法: listeners <tabId> <sel>"), { code: "USAGE" });
+    }
+    const browser = await connect({ ...opts });
+    try {
+      const ev = await browser.cdp(tabId, "Runtime.evaluate", {
+        expression: "document.querySelector(" + JSON.stringify(sel) + ")",
+        returnByValue: false,
+      });
+      const obj = ev && ev.result && (ev.result.result || ev.result);
+      const objectId = obj && obj.objectId;
+      if (!objectId) {
+        process.stdout.write(JSON.stringify({ ok: true, found: false, sel }) + "\n");
+        return;
+      }
+      const got = await browser.cdp(tabId, "DOMDebugger.getEventListeners", { objectId });
+      // 扩展把 CDP 方法结果直接回传（无额外 result 包装）；两种形状都兼容。
+      const raw = (got && (got.listeners || (got.result && got.result.listeners))) || [];
+      const listeners = raw.map((l) => ({
+        type: l.type,
+        useCapture: l.useCapture,
+        once: l.once,
+        passive: l.passive,
+        line: l.lineNumber,
+        column: l.columnNumber,
+      }));
+      process.stdout.write(JSON.stringify({ ok: true, found: true, sel, listeners }) + "\n");
+    } finally {
+      await browser.close();
+    }
+    return;
+  }
+  if (command.cmd === "count-el") {
+    // 选择器匹配数统计：结晶 verify 前实测唯一性（exists 要求恰好 1），一次 evaluate。
+    const { connect } = require("./api");
+    const { tabId, sel } = command.args || {};
+    if (!Number.isInteger(tabId) || !sel) {
+      throw Object.assign(new Error("用法: count-el <tabId> <sel>"), { code: "USAGE" });
+    }
+    const browser = await connect({ ...opts });
+    try {
+      const ev = await browser.run(tabId, "document.querySelectorAll(" + JSON.stringify(sel) + ").length");
+      const count = ev && ev.result && ev.result.value;
+      process.stdout.write(JSON.stringify({ ok: true, sel, count }) + "\n");
+    } finally {
+      await browser.close();
+    }
+    return;
+  }
   const token = readToken();
   if (command.cmd === "doctor") {
     await runDoctor(token, opts);

@@ -17,8 +17,8 @@ const COMMANDS = [
   {
     name: "actions",
     lines: [
-      "actions <domain> <actionId|list> [--param k=v ...] [--dry] [--yes] [--confirmed] [--timeout ms] [--session sid] [--browser-id id] [--allow-failover]",
-      "声明式动作（title+url+guards，可选 steps/verify）：纯导航只核验就绪（taskSucceeded:false）；带 steps 按 click/type/wait/navigate 逐步交互，verify 全过才 true。ask 步骤 exit 4 停下问用户，--confirmed 放行（一次一确认）；--dry 只打印计划；外发必须加 --yes。exit 1 用法 / 2 护栏 / 3 执行失败 / 4 待确认；list 列菜单",
+      "actions <domain> <actionId|[id2 ...]|list> [--param k=v ...] [--dry] [--yes] [--confirmed] [--print] [--emit-script [--out file]] [--timeout ms] [--session sid] [--browser-id id] [--allow-failover]",
+      "声明式动作（title+url+guards，可选 steps/verify）：纯导航只核验就绪（taskSucceeded:false）；带 steps 按 click/type/wait/navigate/blur 逐步交互，verify 全过才 true。ask 步骤 exit 4 停下问用户，--confirmed 放行（一次一确认）；--dry 只打印计划；外发必须加 --yes。exit 1 用法 / 2 护栏 / 3 执行失败 / 4 待确认；list 列菜单；多 actionId 顺序连批（子进程逐条、首败即停）；--print 输出等价单行命令，--emit-script 生成 bash 包装脚本（包装解释器，ask/guards/verify 语义零损失）",
     ],
   },
   {
@@ -61,6 +61,13 @@ const COMMANDS = [
     lines: [
       "close <tabId>",
       "关闭标签页；discover 自管标签生命周期，这条一般只在手工交互时用",
+    ],
+  },
+  {
+    name: "count-el",
+    lines: [
+      "count-el <tabId> <sel>",
+      "选择器匹配数统计（主文档 CSS）：结晶 verify 前实测唯一性（exists 要求恰好 1）与宽匹配体检，一次 evaluate 返回 count",
     ],
   },
   {
@@ -133,6 +140,10 @@ const COMMANDS = [
   {
     name: "list",
     lines: ["list", "列出所有标签页：tabId/标题/URL——一切后续命令的 tabId 从这里拿"],
+  },
+  {
+    name: "listeners",
+    lines: ["listeners <tabId> <sel>", "查节点自己绑定的全部事件监听器（type/useCapture/once/passive/源码行列；addEventListener 与 onxxx=fn 两类都覆盖）；只含该节点，不含祖先与 React 委托在 root 上的监听器；主文档 CSS 选择器"],
   },
   {
     name: "longpress-el",

@@ -228,6 +228,11 @@ function buildCmd(rest, opts = {}) {
     }
     case "list":
       return { cmd: "tabs" };
+    case "listeners": {
+      const [tabId, sel] = args;
+      if (!tabId || !sel) usage();
+      return { cmd: "listeners", args: { tabId: Number(tabId), sel } };
+    }
     case "navigate": {
       const [tabId, url] = args;
       if (!tabId || !url) usage();
@@ -308,6 +313,11 @@ function buildCmd(rest, opts = {}) {
     }
     case "close":
       return { cmd: "close", args: { tabId: Number(args[0]) } };
+    case "count-el": {
+      const [tabId, sel] = args;
+      if (!tabId || !sel) usage();
+      return { cmd: "count-el", args: { tabId: Number(tabId), sel } };
+    }
     case "diag":
       return { cmd: "diag" };
     case "config": {
