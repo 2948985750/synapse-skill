@@ -319,7 +319,7 @@ test("validateAction: verify 单给无 steps 报错；verify 坏 op 被抓", () 
 });
 
 test("STEP_OPS/TYPE_MODES/VERIFY_OPS: 白名单导出", () => {
-  assert.deepEqual(STEP_OPS, ["click", "type", "wait", "navigate"]);
+  assert.deepEqual(STEP_OPS, ["click", "type", "wait", "navigate", "blur"]);
   assert.ok(TYPE_MODES.includes("native") && VERIFY_OPS.includes("exists"));
 });
 

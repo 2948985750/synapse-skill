@@ -66,6 +66,8 @@ test("same-origin navigation includes hash routes and propagates failure without
   const calls = [];
   const browser = {
     tabs: async () => [{ tabId: 8, url: "https://example.test/#/inbox" }],
+    // 可附加探测（findOrOpenTab 选标签前的轻量 evaluate）
+    cdp: async () => ({ result: { value: 1 } }),
     call: async (command, args) => { calls.push({ command, args }); return { loaded: true }; },
     open: async () => { throw new Error("unexpected fallback"); },
   };

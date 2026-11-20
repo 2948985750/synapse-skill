@@ -47,7 +47,7 @@ const { connect } = require("../agent/api");
 const { writeJsonAtomic } = require("../agent/lib/json-store");
 
 // steps 步骤机：操作白名单。交互原语走扩展桥命令，skill 侧不构造页内 JS。
-const STEP_OPS = ["click", "type", "wait", "navigate"];
+const STEP_OPS = ["click", "type", "wait", "navigate", "blur"];
 const TYPE_MODES = ["native", "native-enter", "execCommand"];
 const VERIFY_OPS = ["text", "exists", "navigate"];
 
@@ -105,6 +105,9 @@ function validateAction(action) {
       } else if (st.do === "navigate") {
         if (typeof st.url !== "string" || !st.url) at(`${tag}.url 必填（可用 {param} 模板）`);
         if (st.waitMs !== undefined && (!Number.isFinite(st.waitMs) || st.waitMs < 0)) at(`${tag}.waitMs 必须是非负数`);
+      } else if (st.do === "blur") {
+        // 失焦即提交的输入组件（价格区间等）：可选 sel 指定目标，省略则失焦当前焦点元素。
+        if (st.sel !== undefined && typeof st.sel !== "string") at(`${tag}.sel 必须是选择器`);
       } else {
         if (typeof st.sel !== "string" || !st.sel) at(`${tag}.sel 必填（CSS 选择器）`);
       }
@@ -276,13 +279,28 @@ async function findOrOpenTab(browser, entry) {
   const sameOrigin = tabs.filter((tab) => {
     try { return new URL(tab.url).origin === entryUrl.origin; } catch (_) { return false; }
   });
-  const existing = sameOrigin.find((tab) => new URL(tab.url).href === entryUrl.href) || sameOrigin[0];
-  if (existing) {
-    if (new URL(existing.url).href === entryUrl.href) return { tabId: existing.tabId, reused: true, navigated: false };
-    const budget = remaining();
-    const result = await browser.call("navigate", { tabId: existing.tabId, url: entry.url, waitMs: budget }, { commandTimeoutMs: budget });
-    if (result.loaded !== true) throw new Error("Navigation did not finish loading");
-    return { tabId: existing.tabId, reused: true, navigated: true };
+  // 标签池容错：同源标签逐个作为候选（整 URL 命中优先），附加探测失败
+  // （DevTools 占用等报 "Debugger is not attached"）自动换下一个，全失败再新开。
+  // 不把不可附加的用户标签当成错误扔给上层——那是程序该处理的琐事。
+  const hrefOf = (tab) => { try { return new URL(tab.url).href; } catch (_) { return ""; } };
+  const ordered = [
+    ...sameOrigin.filter((tab) => hrefOf(tab) === entryUrl.href),
+    ...sameOrigin.filter((tab) => hrefOf(tab) !== entryUrl.href),
+  ];
+  const attachError = (e) => /not attached|already attached/i.test(String((e && e.message) || ""));
+  for (const tab of ordered) {
+    try {
+      // 可附加探测：一次轻量 evaluate；DevTools 占用等情况下 attach 会失败。
+      await browser.cdp(tab.tabId, "Runtime.evaluate", { expression: "1", returnByValue: true }, { timeoutMs: Math.min(remaining(), 3000) });
+      if (hrefOf(tab) === entryUrl.href) return { tabId: tab.tabId, reused: true, navigated: false };
+      const budget = remaining();
+      const result = await browser.call("navigate", { tabId: tab.tabId, url: entry.url, waitMs: budget }, { commandTimeoutMs: budget });
+      if (result.loaded !== true) throw new Error("Navigation did not finish loading");
+      return { tabId: tab.tabId, reused: true, navigated: true };
+    } catch (e) {
+      if (attachError(e)) continue; // 该标签不可附加，换下一个候选
+      throw e;
+    }
   }
   const budget = remaining();
   const opened = await browser.open(entry.url, { waitMs: budget, timeoutMs: budget });
@@ -384,6 +402,15 @@ async function execStep(browser, tabId, st, params, stepTimeout, confirmed = fal
     await browser.navigate(tabId, url, { waitMs: st.waitMs !== undefined ? st.waitMs : 8000 });
     return {};
   }
+  if (st.do === "blur") {
+    // 失焦即提交的输入组件：先聚焦目标（确保焦点在它上面）再 blur，触发 focusout
+    // → React onBlur 应用筛选。省略 sel 时直接失焦当前 activeElement。
+    if (st.sel) {
+      await browser.run(tabId, "(function(){var e=document.querySelector(" + JSON.stringify(st.sel) + ");if(e&&e.focus){e.focus()}return 'ok'})()");
+    }
+    await browser.run(tabId, "(function(){var a=document.activeElement;if(a&&a.blur){a.blur()}return 'ok'})()");
+    return {};
+  }
 
   // click / type 前先查元素，做禁用检查与危险标签护栏。
   const info = await queryInfo(browser, tabId, st.sel, timeout);
@@ -433,6 +460,7 @@ function parseArgv(argv) {
   const rest = [];
   const params = {};
   let yes = false, dry = false, confirmed = false, timeoutMs = 180000, session = "", browserId = "", allowFailover = false;
+  let print = false, emitScript = false, outPath = "";
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--param") {
@@ -443,6 +471,12 @@ function parseArgv(argv) {
     } else if (a === "--yes") yes = true;
     else if (a === "--confirmed") confirmed = true;
     else if (a === "--dry") dry = true;
+    else if (a === "--print") print = true;
+    else if (a === "--emit-script") emitScript = true;
+    else if (a === "--out") {
+      outPath = argv[++i];
+      if (!outPath || outPath.startsWith("--")) throw new Error("--out requires a file path");
+    }
     else if (a === "--timeout") {
       timeoutMs = Number(argv[++i]);
       if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("--timeout must be positive and finite");
@@ -458,7 +492,7 @@ function parseArgv(argv) {
     else if (a === "--allow-failover") allowFailover = true;
     else rest.push(a);
   }
-  return { rest, params, yes, dry, confirmed, timeoutMs, session, browserId, allowFailover };
+  return { rest, params, yes, dry, confirmed, timeoutMs, session, browserId, allowFailover, print, emitScript, outPath };
 }
 
 // ---------------- 画像动作菜单（agent 查现有动作；list 子命令） ----------------
@@ -484,13 +518,55 @@ function formatActionMenu(profile) {
     .join("\n");
 }
 
+// 多 action 连批：子进程逐条执行，复用单条 action 的全部语义（护栏/ask/verify/状态），
+// 首败即停并透传该条的退出码。连批不注入 deps（测试路径不受影响）。
+function runBatch(domain, ids, options) {
+  const { spawnSync } = require("node:child_process");
+  const cli = path.resolve(__dirname, "..", "agent", "agent-collect.js");
+  for (const [idx, id] of ids.entries()) {
+    const argv = [cli, "actions", domain, id];
+    for (const [k, v] of Object.entries(options.params || {})) argv.push("--param", `${k}=${v}`);
+    if (options.yes) argv.push("--yes");
+    if (options.dry) argv.push("--dry");
+    if (options.confirmed) argv.push("--confirmed");
+    if (options.timeoutMs !== 180000) argv.push("--timeout", String(options.timeoutMs));
+    if (options.session) argv.push("--session", options.session);
+    if (options.browserId) argv.push("--browser-id", options.browserId);
+    if (options.allowFailover) argv.push("--allow-failover");
+    console.error(`[batch] ${idx + 1}/${ids.length} → ${id}`);
+    const r = spawnSync(process.execPath, argv, { stdio: "inherit" });
+    const code = r.status == null ? 1 : r.status;
+    if (code !== 0) {
+      console.error(`[batch] ${id} 失败（exit ${code}），中止后续 ${ids.length - idx - 1} 条`);
+      process.exitCode = code;
+      return;
+    }
+    console.error(`[batch] ${id} ✓`);
+  }
+}
+
 async function main(argv, deps = {}) {
-  const { rest, params, yes, dry, confirmed, timeoutMs, session, browserId, allowFailover } = parseArgv(argv);
-  const [domain, actionId] = rest;
-  if (!domain || !actionId) {
-    console.error("用法: node runner/actions.js <domain> <actionId|list> [--param k=v ...] [--yes] [--dry] [--session sid] [--timeout ms]");
+  const parsed = parseArgv(argv);
+  const { rest, params, yes, dry, confirmed, timeoutMs, session, browserId, allowFailover, print, emitScript, outPath } = parsed;
+  const [domain, ...actionIds] = rest;
+  if (!domain || !actionIds.length) {
+    console.error("用法: node runner/actions.js <domain> <actionId|[actionId2 ...]|list> [--param k=v ...] [--yes] [--dry] [--print] [--emit-script [--out path]] [--session sid] [--timeout ms]");
     process.exit(1);
   }
+  // 多 action 顺序连批：逐条以子进程执行，首败即停。
+  if (actionIds.length > 1) {
+    if (actionIds.includes("list")) {
+      console.error("list 不能与其它 actionId 混用");
+      process.exit(1);
+    }
+    if (print || emitScript) {
+      console.error("--print/--emit-script 只支持单 action");
+      process.exit(1);
+    }
+    runBatch(domain, actionIds, { params, yes, dry, confirmed, timeoutMs, session, browserId, allowFailover });
+    return;
+  }
+  const actionId = actionIds[0];
 
   const profile = await (deps.loadProfile || loadProfile)(domain);
   if (actionId === "list") {
@@ -513,9 +589,48 @@ async function main(argv, deps = {}) {
     process.exit(1);
   }
 
-  // 参数声明来自 url 里的 {param} 模板（不再要求独立的 params 字段）。
-  const declared = new Set((action.url.match(/{([a-zA-Z0-9_]+)}/g) || []).map((t) => t.slice(1, -1)));
+  // 参数声明扫描 action 全部 {param} 模板位：url + steps.value/steps.url + verify.expect
+  // （url 只是入口，参数可能只出现在步骤/验证里——如搜索 action 的 q 在 type.value）。
+  const declared = new Set(
+    [action.url]
+      .concat((action.steps || []).flatMap((st) => [st.value, st.url]))
+      .concat((action.verify || []).map((v) => v.expect))
+      .filter((s) => typeof s === "string")
+      .flatMap((s) => (s.match(/{([a-zA-Z0-9_]+)}/g) || []).map((t) => t.slice(1, -1))),
+  );
   const missing = [...declared].filter((k) => !params[k]);
+
+  // 生成器：--print 输出等价的单行命令；--emit-script 生成参数化 bash 包装脚本。
+  // 生成物一律包装解释器（actions 命令），不拆步骤——语义零损失：ask 照停、
+  // guards.never 照拦、verify 照验、状态照回写。
+  if (print || emitScript) {
+    const names = [...declared];
+    if (print) {
+      const parts = ["node", "agent/agent-collect.js", "actions", domain, actionId];
+      for (const k of names) parts.push("--param", `"${k}=${params[k] || "{" + k + "}"}"`);
+      console.log(parts.join(" "));
+      process.exit(0);
+    }
+    const cliAbs = path.resolve(__dirname, "..", "agent", "agent-collect.js");
+    const bashParams = names
+      .map((k, i) => '--param "' + k + '=${' + (i + 1) + ":?缺参数 " + k + '}"')
+      .join(" ");
+    const body = [
+      "#!/usr/bin/env bash",
+      `# 由画像生成：${domain} / ${action.title || actionId}（${new Date().toISOString().slice(0, 10)}）`,
+      `# 改行为请改画像后重新生成，勿手改本文件。参数（按顺序）：${names.join(" ") || "（无）"}`,
+      "set -euo pipefail",
+      'node "' + cliAbs.replace(/"/g, '\\"') + '" actions ' + domain + " " + actionId + (bashParams ? " " + bashParams : ""),
+      "",
+    ].join("\n");
+    if (outPath) {
+      fs.writeFileSync(path.resolve(outPath), body, "utf8");
+      console.error("已生成: " + path.resolve(outPath));
+    } else {
+      process.stdout.write(body);
+    }
+    process.exit(0);
+  }
 
   // 护栏状态与检查。--dry 永不执行也不拦截退出码：它只如实展示「真跑会被什么拦」，
   // 拦截决定发生在真跑分支（--yes/interval/cap 在那里硬拦）。
