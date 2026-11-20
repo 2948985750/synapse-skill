@@ -110,6 +110,7 @@ chrome.debugger 支持的 CDP 域）：读渲染 DOM、点选/输入、跑页内
 **边界情况**（共性铁律：出错先跑 `diag` 取诊断，把原始错误和证据带给用户，不编造结果）：
 - **页面未渲染**：collect-elements/run 结果空或偏少 → 等 1–2 秒重试，仍空 navigate 重载；别把"没加载"当"没功能"。
 - **索引/标签失效**：索引只在当次有效，导航/刷新后重抓，`found:false` 或 label 漂移别猜；`No tab with given id` = 标签被关或浏览器重启，重 `list` 拿新 tabId。
+- **组件点击无效**：先 `listeners <tabId> <sel>` 查直绑监听器并按**类型**选派发——有 click → `click-el` 可试；只有 mousedown/pointerdown → 直接 `click-cdp`（el.click 发不出这些）。目标各层全空 → 查 `listeners body`/应用根：全套 capture+bubble 集合（源码位置统一）= React 委托，派发方式实证（合成无效 ⇒ `click-cdp`，steps 里 `mode:"cdp"`）。先换目标层再换派发方式，别盲目跳 CDP 坐标。
 - **CDP 超时**：`CDP_TIMEOUT` = 结果未知，禁止自动重发有副作用的操作；弹窗只记录不自动确认，处理按用户明确决定调 `Page.handleJavaScriptDialog`；关标签可能丢未保存内容，先告知。
 - **登录墙**：请用户手动登录；不代填密码/验证码，不伪造 cookie。
 - **反爬信号**（验证码/`_security_check`/429、5xx 频发）：停止重试、拉大间隔（≥2s）、带证据报告；不绕过验证码。
@@ -128,13 +129,14 @@ chrome.debugger 支持的 CDP 域）：读渲染 DOM、点选/输入、跑页内
 | `read-page` | `<tabId> ['<options-json>'\|@file]` | 按 scope 读取区域文本；maxChars 默认 4000；options 可传 contextId/sessionId。 |
 | `wait-for` | `<tabId> '<condition-json>'\|@file` | 等待 locator 的 visible/hidden/attached/detached、text/value 或精确 url；默认 10 秒，超时不重复动作。 |
 | `click-cdp` | `<tabId> <i\|el-json>` | 检查可见性、遮挡和位置稳定后发送 CDP 鼠标输入；失败不自动回退为 DOM 点击。 |
-| `actions` | `<domain> <actionId\|list> [--param k=v ...] [--dry] [--yes] [--confirmed] [--timeout ms] [--session sid] [--browser-id id] [--allow-failover]` | 声明式动作（title+url+guards，可选 steps/verify）：纯导航只核验就绪（taskSucceeded:false）；带 steps 按 click/type/wait/navigate 逐步交互，verify 全过才 true。ask 步骤 exit 4 停下问用户，--confirmed 放行（一次一确认）；--dry 只打印计划；外发必须加 --yes。exit 1 用法 / 2 护栏 / 3 执行失败 / 4 待确认；list 列菜单 |
+| `actions` | `<domain> <actionId\|[id2 ...]\|list> [--param k=v ...] [--dry] [--yes] [--confirmed] [--print] [--emit-script [--out file]] [--timeout ms] [--session sid] [--browser-id id] [--allow-failover]` | 声明式动作（title+url+guards，可选 steps/verify）：纯导航只核验就绪（taskSucceeded:false）；带 steps 按 click/type/wait/navigate/blur 逐步交互，verify 全过才 true。ask 步骤 exit 4 停下问用户，--confirmed 放行（一次一确认）；--dry 只打印计划；外发必须加 --yes。exit 1 用法 / 2 护栏 / 3 执行失败 / 4 待确认；list 列菜单；多 actionId 顺序连批（子进程逐条、首败即停）；--print 输出等价单行命令，--emit-script 生成 bash 包装脚本（包装解释器，ask/guards/verify 语义零损失） |
 | `attach` | `<tabId>` | 手动把调试器附加到标签——桥执行命令时会自动 attach，这条只做排障用 |
 | `capture` | `<tabId> <url\|reload\|wait> [--duration ms] [--filter <re>] [--body-max kb] [--all]` | 网络响应体捕获：触发导航/重载后抓该标签的 XHR/fetch 请求 + 响应体 |
 | `capture-many` | `<tabId:action> [<tabId:action> ...] [--duration ms] [--filter <re>] [--body-max kb] [--all]` | 多标签并行网络捕获：不同 tab 各开一个 capture session，tabId 必须互不相同（同 tab + 同 client 的 capture session 互斥）；action 同 capture |
 | `cdp` | `<tabId> <method> ['<params-json>'\|@file] [--param k=v ...]` | 任意 CDP 方法透传；@file 免 shell 引号，--param k=v 可追加/覆盖 params 里的键，JS 对象无序列化损耗；返回 CDP 原始回复，成功结果取 .result |
 | `click-el` | `<tabId> <i\|el-json> [--label <text>]` | 支持快照完整条目（含 ref）或唯一定位器 {sel,scope}/{role,name}；优先传完整条目，避免同名元素重排误点 |
 | `close` | `<tabId>` | 关闭标签页；discover 自管标签生命周期，这条一般只在手工交互时用 |
+| `count-el` | `<tabId> <sel>` | 选择器匹配数统计（主文档 CSS）：结晶 verify 前实测唯一性（exists 要求恰好 1）与宽匹配体检，一次 evaluate 返回 count |
 | `config` | `[set <key> <dir> \| reset]` | 显示数据目录与来源；config set data-root <dir> 指定数据根、config set output-dir <dir> 指定采集产物根、config set profile-root <dir> 指定画像根；config reset 清掉自定义路径回到默认。纯本地命令，无需连接扩展 |
 | `dblclick-el` | `<tabId> <i\|el-json> [--label <text>]` | 按 collect-elements 索引双击：mousedown/up×2 + click(detail2) + dblclick；注意小红书/抖音等媒体卡片双击=点赞，此类站点慎用 |
 | `detach` | `<tabId>` | 解除标签上的调试器，attach 之后想彻底释放用这条 |
@@ -146,6 +148,7 @@ chrome.debugger 支持的 CDP 域）：读渲染 DOM、点选/输入、跑页内
 | `hover-el` | `<tabId> <i\|el-json> [--label <text>]` | 悬停（mouseover/mouseenter/mousemove）；用于悬停触发的下拉/气泡/懒加载 |
 | `key-el` | `<tabId> <key> [<i\|el-json>] [--modifiers ctrl,shift\|0-15]` | 按键（异步；扩展 0.16.0+ 支持）；key=Enter/a/ArrowUp 等；省略 el 打到 document.body；--modifiers 逗号名单或位掩码（Alt1\|Ctrl2\|Meta4\|Shift8） |
 | `list` | `—` | 列出所有标签页：tabId/标题/URL——一切后续命令的 tabId 从这里拿 |
+| `listeners` | `<tabId> <sel>` | 查节点自己绑定的全部事件监听器（type/useCapture/once/passive/源码行列；addEventListener 与 onxxx=fn 两类都覆盖）；只含该节点，不含祖先与 React 委托在 root 上的监听器；主文档 CSS 选择器 |
 | `longpress-el` | `<tabId> <i\|el-json> [--hold <ms>]` | 长按（异步；扩展 0.16.0+ 支持）；pointerdown/mousedown → 按住 hold 毫秒 → up；省略 --hold 默认 600ms；长按在部分站点弹上下文菜单/进多选 |
 | `media-el` | `<tabId> <i\|el-json> [play\|pause\|mute\|unmute]` | 媒体控制（play/pause/mute/unmute）；缺省 play；目标是 <audio>/<video> 元素 |
 | `navigate` | `<tabId> <url>` | 复用已有标签页导航到新 URL；默认等 load 完成，--nowait 跳过等待 |

@@ -7,6 +7,25 @@
 
 ---
 
+### steps 新增 blur 动词 + goofish 筛选组件全覆盖（2026-11-20，未提交）
+
+- 现象：goofish 筛选组件此前只结晶了"个人闲置"一个复选，排序（综合/新降价/新发布/价格下拉）与价格区间完全未覆盖；此前"排序面板 0×0 无触发器"的结论是错的——触发器（search-select-title-container）可见，只是下拉展开依赖真鼠标序列（合成 click/hover 均无效），价格区间则靠**失焦（blur）**应用、确定按钮高度 0 不可交互。
+- 修法：`runner/actions.js` 步骤机新增 `blur` 动词（STEP_OPS/校验/execStep 三处；可选 sel，先 focus 再 blur 触发 focusout→React onBlur）；test-actions 白名单断言同步；commands.js 描述与 PROFILE-COLLECTION.md 步骤机 spec 同步。goofish 画像新增 3 个 action：排序最近活跃（展开综合下拉第 1 项 → 点第 2 项）、排序价格从低到高（价格下拉第 4 项 → 点第 1 项）、价格区间筛选（{min}/{max} 输入 + blur），排序 action 的 click 步用 mode:cdp。
+- 验收：三条 action runner 复跑全过；连批 `排序最近活跃 排序价格从低到高 价格区间筛选` 三连 taskSucceeded:true；手动验证 blur 应用（min=10 生效、max=20 生效、min>max 钳制）。npm test 五组全绿（35/10/11/22/22）。
+
+### actions 批处理与生成器 + 标签池容错 + count-el（2026-11-20，未提交）
+
+- 现象：LLM 仍承担程序该做的琐事——①runner 撞上被 DevTools 占用的同源标签报 `Debugger is not attached`，要靠人工关标签；②"搜索→筛选"要 LLM 逐条发命令盯结果；③结晶前要手跑 JS 数 verify 选择的匹配数；④steps 无法生成可复用命令/脚本。
+- 修法：①`findOrOpenTab` 改标签池：同源候选按整 URL 命中优先排序，逐个做轻量附加探测（`Runtime.evaluate "1"`），附加失败自动换下一个、全失败新开标签，非附加类导航错误照常上抛；②`actions` 支持多 actionId 顺序连批（子进程逐条执行、复用单条全部语义、首败即停并透传退出码）；③新增 `count-el <tabId> <sel>` 本地命令（一次 evaluate 返回匹配数，替代手跑 JS）；④`actions --print` 输出等价单行命令、`--emit-script [--out]` 生成参数化 bash 包装脚本（包装解释器不拆步骤——ask/guards/verify 语义零损失）。附带修正：参数声明从"仅 url 模板"扩为扫描 url+steps.value/steps.url+verify.expect（搜索 action 的 q 只在 steps.value，此前 --print 漏参、缺参检查漏报）。
+- 验收：连批实跑 1/2 搜索 ✓ → 2/2 筛选 ✓ 均 taskSucceeded:true；count-el 实测 checked sel=0、price-wrap=30；--print/--emit-script 输出正确；npm test 五组全绿（35/10/11/22/22，test-runtime 的 findOrOpenTab mock 补 cdp 探测桩）。
+
+### 新增 `listeners` 命令：元素直绑监听器探测（2026-11-20，未提交）
+
+- 现象：采集期组件点击无效时，无法判断点击处理器挂在哪个层级——goofish 筛选复选实例中，容器点击无效、内层 div 有效，误判过一次"前端风控免疫"。DOM 公开 API 无法枚举监听器；`$0.onclick` 只能看属性式绑定；DevTools 的 `getEventListeners` 不在页面作用域。
+- 根因与突破：`DOMDebugger.getEventListeners` 在 chrome.debugger 域内可调用，但 objectId 的生命周期绑调试会话（clientId）——两次独立 CLI 进程必失效（实测报 "Could not find object with given id"）；同一桥连接内连发 evaluate+getEventListeners 则完全可用（实测抓内层 checkbox 的 click 监听 line 73）。
+- 修法：纯 skill 侧新增 `listeners <tabId> <sel>` 本地命令（agent-collect.js 本地分发 + cli.js 解析 + 命令表注册）：同一会话内 `Runtime.evaluate`(returnByValue:false) 取 objectId → `DOMDebugger.getEventListeners`，输出 `{type,useCapture,once,passive,line,column}`。无扩展改动、无需商店重新提审。初版曾读错回复形状（`got.result.listeners`，实际无 result 包装）致恒空，已修并双形状兼容。
+- 验收：双机制绑定元素（onclick 属性 + addEventListener capture）两种监听器均能检出；goofish 内层 checkbox 返回 click(line 73)、容器返回空——与实测点击行为完全吻合。PROFILE-COLLECTION.md 探测阶梯与 SKILL.md 边界情况同步（无效点击→先 listeners 后逐层 click 实证）。npm test 五组全绿（35/10/11/22/22）。
+
 ### SKILL.md 两层渐进加载：采集细则切片 + 排障压缩（2026-11-20，未提交）
 
 - 现象：SKILL.md 29847 字节在技能触发时全量注入，其中「采集画像」段 5892 字符（34%）只有采集任务才需要——日常"用画像"会话白付；边界情况 15 条与故障转移 ~1900 字符属低频排障知识。

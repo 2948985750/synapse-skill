@@ -16,7 +16,7 @@ SKILL.md「采集画像」入口指向这里。**接到采集/结晶任务时读
 
 1. **判站**：打开入口页先确定这是个什么站、主要用来干什么——电商搜索 / 内容社区 / 企业信息查询 / 工具站 / 后台管理……依据页标题、URL 路由、`pages[].structure` 的 forms/lists、可见文本。判站用来定采集边界：划出核心主功能，`/legal`、`/blog`、营销页这类噪音排除；排除清单写进顶层 `excluded`（没有就建），不静默丢弃。
 2. **圈功能清单**：`list` 拿入口 tabId → `collect-elements` 全量枚举可交互元素，配合 structure 与页标题交叉确认，按用户意图把交互点归组成功能清单（搜索、筛选、查看详情、登录、发布……）。每个功能先分档再排期：**读类**（浏览/搜索/查看）实操结晶；**写类**（发布/编辑/发消息）只走到就绪态、提交动作挂 `ask`；**禁区**（支付/下单/账号安全类：改密、注销、退出登录）永不实操、记 `pending` 带入口。登录墙后的路由一律记 `pending` 不强进。
-3. **逐功能实操并结晶**，每个功能走同一个循环：① 定位入口；② `collect-elements` 枚举该功能的交互点；③ 交互（`click-el`/`type-el`/`click-cdp`/`scroll-el`/`key-el`）——定位一律优先 `{sel}` 唯一选择器，索引/ref 只在当次有效且 label 会漂移（热词轮换/动态 feed 实测即过期），漂移就重抓、不对旧引用硬试；④ 观察效果：落点 URL、页标题、DOM 变化（`run` 查 `location.href`/关键元素）；⑤ 定 verify 条件——先用 `run` 实测候选 sel 在落点页的匹配数必须 ==1（多命中报 AMBIGUOUS 且被 verify 当不存在静默轮询到超时），URL 直接承载结果的优先 url 模板直达，页内交互才上 steps；⑥ 回写：跑通当场参数化成 `steps`+`verify` 写进 `actions[]` 带 `verified`，跑不通进 `pending[]` 带原因和证据。采集期顺 url 观测补 `limits.routes`、坑写 `pageNotes`；确需保存某页结构证据才追加 `pages[]`（同步 `digest.pages`）。
+3. **逐功能实操并结晶**，每个功能走同一个循环：① 定位入口；② `collect-elements` 枚举该功能的交互点；③ 交互（`click-el`/`type-el`/`click-cdp`/`scroll-el`/`key-el`）——定位一律优先 `{sel}` 唯一选择器，索引/ref 只在当次有效且 label 会漂移（热词轮换/动态 feed 实测即过期），漂移就重抓、不对旧引用硬试；**点击无效果时先做目标层探测**：跑 `listeners <tabId> <sel>` 查节点直绑的监听器（addEventListener 与 onxxx=fn 两类全覆盖、含 capture/once 标志；不含祖先与 React 委托）——按监听器**类型**选派发方式：有 `click` 监听器 → `click-el` 可试；**只有 mousedown/pointerdown/pointerup** → el.click() 必然无效（我们只能合成 click），直接 `click-cdp`。**目标与各候选层全空** → 查委托根（`listeners <tabId> body` 或应用根容器）：出现 capture+bubble 双份、源码位置统一（如 line 45）的全套事件集合 = React 17+ 委托特征，派发方式只能实证（先逐层元素级 `click-el`，状态无变化则依赖真序列→`click-cdp`）。div 模拟控件（复选/开关/卡片）的处理器常挂在内层子元素上、容器 click 无效；实测：goofish 排序下拉目标三层全空、body 见全套 React 委托集合，合成 click/hover 均无效、click-cdp 才展开——此时 `click-cdp`（steps 里 `mode:"cdp"`）是正确路径而非最后手段，展开与选项点击都要 cdp；CDP 坐标受重渲染/布局漂移影响，用前确认元素 rect 新鲜（click-cdp 自带可见性/遮挡检查）；④ 观察效果：落点 URL、页标题、DOM 变化（`run` 查 `location.href`/关键元素）；⑤ 定 verify 条件——用 `count-el <tabId> <sel>` 实测候选 sel 在落点页的匹配数必须 ==1（多命中报 AMBIGUOUS 且被 verify 当不存在静默轮询到超时），URL 直接承载结果的优先 url 模板直达，页内交互才上 steps；⑥ 回写：跑通当场参数化成 `steps`+`verify` 写进 `actions[]` 带 `verified`，跑不通进 `pending[]` 带原因和证据。采集期顺 url 观测补 `limits.routes`、坑写 `pageNotes`；确需保存某页结构证据才追加 `pages[]`（同步 `digest.pages`）。
 4. **汇报请人审**：功能清单逐条交代去向（结晶/pending/excluded），覆盖率=结晶数/读类功能总数，附知识要点与 `pending`，是否 git 提交由用户定。
 
 ## 一条 action 的边界——按用户意图切分
@@ -62,11 +62,11 @@ SKILL.md「采集画像」入口指向这里。**接到采集/结晶任务时读
 ## actions 的 steps 步骤机
 
 （可选，把重放价值高的交互链沉淀成数据）：`url` 仍是入口，先导航核验就绪；
-`steps[]` 按顺序执行，每步 `do` ∈ `click`/`type`/`wait`/`navigate`：
+`steps[]` 按顺序执行，每步 `do` ∈ `click`/`type`/`wait`/`navigate`/`blur`：
 
 - `click`/`type` 靠 `sel`（CSS 选择器）；`type` 另需 `value`（可用 `{param}` 模板）+ 可选 `mode`
   （`native`/`native-enter`/`execCommand`）；`click` 可选 `mode:cdp`（合成点击无效时用真鼠标）。
-- `wait` 用 `ms` 或 `sel`；`navigate` 用 `url`。
+- `wait` 用 `ms` 或 `sel`；`navigate` 用 `url`；`blur`（可选 `sel`）失焦当前/指定输入——失焦即提交的组件（价格区间等）用。
 - 每步可选 `unless`（选择器已存在则跳过，幂等）、`timeout`（单步超时）、`note`。
 - **`ask`**：标了 `ask:"问用户的话"` 的步骤，runner 执行到此前停住、以 exit 4 返回问题，
   用户明确同意后加 `--confirmed` 重跑才继续。写类/外发/不可逆操作必须挂 `ask`，配合
